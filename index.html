@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no" />
+<title>Bureau de Transit</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://unpkg.com/@supabase/supabase-js@2"></script>
+<script src="https://unpkg.com/lucide@latest"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #060C18; font-family: -apple-system, BlinkMacSystemFont, 'Inter', sans-serif; }
+  input:focus { border-color: #C4952A !important; outline: none; }
+  @keyframes spin { from { transform: rotate(0deg);} to { transform: rotate(360deg);} }
+  .spin { animation: spin 1s linear infinite; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect } = React;
+
+/* ---------- Supabase ---------- */
+const SUPABASE_URL = "https://muhfzovmjqsymgidmkoe.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im11aGZ6b3ZtanFzeW1naWRta29lIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ0OTQwNTAsImV4cCI6MjEwMDA3MDA1MH0.RGEQ_nNbSIxKAxGF8bFNwOTtEc-SYFtY9P4xezx8Tlc";
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+/* ---------- Constantes visuelles ---------- */
+const INK = "#060C18";
+const INK_2 = "#0B1526";
+const GOLD = "#C4952A";
+const PAPER = "#F4F1E8";
+const MUTED = "#8B93A7";
+const RED = "#E5484D";
+const AMBER = "#F5B93D";
+const GREEN = "#3FC98A";
+
+/* ---------- Constantes métier ---------- */
+const TYPES_OP = ["Import", "Export", "Transit"];
+const EQUIPEMENTS = ["20'", "40'", "Roulant", "Autre"];
+const AVD_STATUTS = ["Soumis", "En suspens", "En requête", "Resoumis", "Validé"];
+const LICENCE_TYPES = ["137", "155", "151", "153", "129", "Autre"];
+const LICENCE_STATUTS = ["À payer", "Soumis", "En suspens", "Approuvée", "Expirée"];
+const EXO_STATUTS = ["Soumis", "En suspens", "Resoumis", "Approuvée"];
+const DECL_STATUTS = ["Non tirée", "Tirée", "Suivi en cours", "USN émis", "USN payée", "Clôturée"];
+const PAYEURS = ["Boss", "Agent"];
+
+/* ---------- Icônes Lucide (rendues via balise <i data-lucide>) ---------- */
+function Icon({ name, size = 16, color = PAPER, style = {} }) {
+  const ref = React.useRef(null);
+  useEffect(() => {
+    if (ref.current) {
+      ref.current.innerHTML = "";
+      const svg = window.lucide.icons[name];
+      if (svg) {
+        ref.current.innerHTML = svg.toSvg({ width: size, height: size, color, "stroke-width": 1.8 });
+      }
+    }
+  }, [name, size, color]);
+  return <span ref={ref} style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", ...style }} />;
+}
+
+/* ---------- Utilitaires ---------- */
+function hoursSince(dateStr) {
+  if (!dateStr) return null;
+  return (Date.now() - new Date(dateStr).getTime()) / 36e5;
+}
+
+function urgencyOf(d) {
+  const avdReq = d.statut_avd === "En requête";
+  const licReq = (d.statuts_licences || []).some((l) => l.statut === "En requête");
+  let red = false, yellow = false;
+  if (avdReq || licReq) {
+    yellow = true;
+    const h = hoursSince(d.statut_avd_changed_at);
+    if (h !== null && h > 48) red = true;
+  }
+  if (red) return "red";
+  if (yellow) return "yellow";
+  return null;
+}
+
+function fmtFCFA(n) {
+  return new Intl.NumberFormat("fr-FR").format(Math.round(n || 0)) + " F";
+}
+
+function timeAgo(dateStr) {
+  const h = hoursSince(dateStr);
+  if (h === null) return "";
+  if (h < 1) return Math.round(h * 60) + " min";
+  if (h < 48) return Math.round(h) + " h";
+  return Math.round(h / 24) + " j";
+}
+
+async function getNextRepertoire() {
+  const { data, error } = await supabase.rpc("next_repertoire");
+  if (error) throw error;
+  const row = Array.isArray(data) ? data[0] : data;
+  return { repertoire: row.repertoire, sequence_number: row.seq };
+}
+
+async function setStartSequenceRemote(n) {
+  const { error } = await supabase.rpc("set_start_sequence", { p_start: n });
+  if (error) throw error;
+}
+
+async function fetchStartSequence() {
+  const { data, error } = await supabase.from("app_config").select("value").eq("key", "start_sequence").maybeSingle();
+  if (error) throw error;
+  return data ? data.value : null;
+}
+
+/* ---------- Styles partagés ---------- */
+const inputStyle = {
+  width: "100%", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.12)",
+  borderRadius: 10, padding: "10px 12px", color: PAPER, fontSize: 14,
+};
+const selectChipStyle = (active) => ({
+  padding: "8px 14px", borderRadius: 9, fontSize: 13, fontWeight: 600, cursor: "pointer",
+  border: "1px solid " + (active ? GOLD : "rgba(255,255,255,0.12)"),
+  background: active ? "rgba(196,149,42,0.16)" : "rgba(255,255,255,0.03)",
+  color: active ? GOLD : MUTED,
+});
+
+/* ---------- Composants UI ---------- */
+function Badge({ children, tone }) {
+  const tones = {
+    red: { bg: "rgba(229,72,77,0.14)", fg: "#FF8A8D", bd: "rgba(229,72,77,0.4)" },
+    amber: { bg: "rgba(245,185,61,0.14)", fg: AMBER, bd: "rgba(245,185,61,0.4)" },
+  };
+  const t = tones[tone];
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11.5, fontWeight: 600, padding: "3px 9px", borderRadius: 999, background: t.bg, color: t.fg, border: "1px solid " + t.bd, whiteSpace: "nowrap" }}>
+      {children}
+    </span>
+  );
+}
+
+function Field({ label, children }) {
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: MUTED, marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.04em" }}>{label}</label>
+      {children}
+    </div>
+  );
+}
+
+function StatusPicker({ options, value, onChange, danger }) {
+  danger = danger || "En requête";
+  return (
+    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+      {options.map((o) => {
+        const active = value === o;
+        const isDanger = o === danger;
+        return (
+          <div key={o} onClick={() => onChange(o)} style={{
+            padding: "7px 12px", borderRadius: 8, fontSize: 12.5, fontWeight: 600, cursor: "pointer",
+            border: "1px solid " + (active ? (isDanger ? RED : GOLD) : "rgba(255,255,255,0.1)"),
+            background: active ? (isDanger ? "rgba(229,72,77,0.15)" : "rgba(196,149,42,0.15)") : "rgba(255,255,255,0.02)",
+            color: active ? (isDanger ? "#FF8A8D" : GOLD) : MUTED,
+          }}>{o}</div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ModuleCard({ icon, title, children }) {
+  return (
+    <div style={{ background: INK_2, border: "1px solid rgba(255,255,255,0.08)", borderRadius: 14, padding: 18, marginBottom: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+        <Icon name={icon} size={16} color={GOLD} />
+        <span style={{ fontSize: 13, fontWeight: 700, color: PAPER, textTransform: "uppercase", letterSpacing: "0.04em" }}>{title}</span>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function StatPill({ label, value, tone }) {
+  const colors = { gold: GOLD, red: RED, amber: AMBER, muted: PAPER };
+  return (
+    <div style={{ background: INK_2, border: "1px solid rgba(255,255,255,0.08)", borderRadius: 12, padding: "14px 16px", flex: 1, minWidth: 120 }}>
+      <div style={{ fontSize: 10.5, color: MUTED, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>{label}</div>
+      <div style={{ fontSize: 22, fontWeight: 700, color: colors[tone] || PAPER }}>{value}</div>
+    </div>
+  );
+}
+
+/* ---------- Configuration point de départ ---------- */
+function StartSequenceSetup({ onConfirm }) {
+  const [value, setValue] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const n = parseInt(value, 10);
+  const valid = value.trim() !== "" && Number.isInteger(n) && n > 0;
+
+  const handleConfirm = async () => {
+    if (!valid) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await setStartSequenceRemote(n);
+      const actual = await fetchStartSequence();
+      onConfirm(actual !== null ? actual : n);
+    } catch (e) {
+      setError("Impossible d'enregistrer le point de départ. Vérifiez la connexion.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ maxWidth: 480, margin: "60px auto 0" }}>
+      <div style={{ textAlign: "center", marginBottom: 26 }}>
+        <div style={{ fontSize: 11, color: GOLD, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700, marginBottom: 8 }}>Première configuration</div>
+        <h1 style={{ fontSize: 22, fontWeight: 700, color: PAPER, margin: 0 }}>Point de départ du répertoire</h1>
+        <p style={{ fontSize: 13.5, color: MUTED, marginTop: 10, lineHeight: 1.5 }}>
+          Choisissez le numéro par lequel commencer. Chaque nouveau dossier reprendra le format
+          <span style={{ fontFamily: "ui-monospace, monospace", color: PAPER }}> OK26[ID]SS</span> et s'incrémentera à partir de cette base, partagée entre tous les collaborateurs.
+        </p>
+      </div>
+      <div style={{ background: INK_2, border: "1px solid rgba(255,255,255,0.08)", borderRadius: 16, padding: 24 }}>
+        <Field label="Numéro de départ (ID)">
+          <input style={inputStyle} type="number" min="1" placeholder="Ex : 1" value={value} onChange={(e) => setValue(e.target.value)} />
+        </Field>
+        {valid && (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 14px", background: "rgba(196,149,42,0.08)", border: "1px solid rgba(196,149,42,0.25)", borderRadius: 10, marginBottom: 4 }}>
+            <span style={{ fontSize: 13, color: GOLD, fontWeight: 600 }}>Premier dossier</span>
+            <span style={{ fontSize: 16, fontWeight: 700, color: GOLD, fontFamily: "ui-monospace, monospace" }}>OK26{n}SS</span>
+          </div>
+        )}
+        {error && <div style={{ fontSize: 12.5, color: "#FF8A8D", marginTop: 8 }}>{error}</div>}
+        <button onClick={handleConfirm} disabled={!valid || saving} style={{
+          width: "100%", marginTop: 18, padding: "13px", borderRadius: 11, border: "none", background: GOLD, color: INK,
+          fontSize: 14.5, fontWeight: 700, cursor: valid && !saving ? "pointer" : "not-allowed", opacity: valid && !saving ? 1 : 0.5,
+          display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+        }}>
+          {saving && <Icon name="loader-2" size={16} color={INK} style={{ animation: "spin 1s linear infinite" }} />}
+          {saving ? "Enregistrement…" : "Valider ce point de départ"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Carte dossier ---------- */
+function DossierCard({ d, onOpen }) {
+  const urgency = urgencyOf(d);
+  const opIconMap = { Import: "arrow-down-right", Export: "arrow-up-right", Transit: "arrow-right-left" };
+  const equipIconMap = { "20'": "container", "40'": "container", "Roulant": "truck", "Autre": "package" };
+  const reste = (d.montant_total || 0) - (d.montant_paye || 0);
+  const borderColor = urgency === "red" ? "rgba(229,72,77,0.55)" : urgency === "yellow" ? "rgba(245,185,61,0.5)" : "rgba(255,255,255,0.08)";
+
+  return (
+    <button onClick={() => onOpen(d)} style={{
+      textAlign: "left", width: "100%", cursor: "pointer", background: INK_2,
+      border: "1px solid " + borderColor, borderRadius: 14, padding: "16px 18px",
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+        <div style={{ display: "flex", gap: 12, minWidth: 0 }}>
+          <div style={{ width: 38, height: 38, borderRadius: 10, flexShrink: 0, background: "rgba(196,149,42,0.1)", border: "1px solid rgba(196,149,42,0.25)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Icon name={equipIconMap[d.equipement] || "package"} size={18} color={GOLD} />
+          </div>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 13.5, fontWeight: 600, color: PAPER }}>{d.repertoire}</span>
+              {urgency === "red" && <Badge tone="red"><Icon name="alert-triangle" size={11} color="#FF8A8D" />48h+</Badge>}
+              {urgency === "yellow" && <Badge tone="amber"><Icon name="clock" size={11} color={AMBER} />En requête</Badge>}
+            </div>
+            <div style={{ fontSize: 13, color: MUTED, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {d.marchandise || "Marchandise non précisée"}
+            </div>
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+          <Icon name={opIconMap[d.type_op] || "package"} size={14} color={GOLD} />
+          <span style={{ fontSize: 12.5, color: PAPER, fontWeight: 600 }}>{d.type_op}</span>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: MUTED, margin: "14px 0 6px" }}>
+        <span>AVD</span><span>{d.statut_avd}</span>
+      </div>
+
+      <div style={{ height: 1, background: "rgba(255,255,255,0.08)", margin: "10px 0 14px" }} />
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 14 }}>
+          <div>
+            <div style={{ fontSize: 10.5, color: MUTED, textTransform: "uppercase" }}>Reste à payer</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: reste > 0 ? "#FF8A8D" : GREEN }}>{fmtFCFA(reste)}</div>
+          </div>
+          <div>
+            <div style={{ fontSize: 10.5, color: MUTED, textTransform: "uppercase" }}>Déclaration</div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: PAPER }}>{d.declaration_etat}</div>
+          </div>
+        </div>
+      </div>
+    </button>
+  );
+}
+
+/* ---------- Formulaire nouveau dossier ---------- */
+function NewDossierForm({ onCancel, onCreate }) {
+  const [typeOp, setTypeOp] = useState("Import");
+  const [marchandise, setMarchandise] = useState("");
+  const [equipement, setEquipement] = useState("20'");
+  const [equipementAutre, setEquipementAutre] = useState("");
+  const [montantTotal, setMontantTotal] = useState("");
+  const [montantPaye, setMontantPaye] = useState("");
+  const [payeur, setPayeur] = useState("Boss");
+  const [lieuPaiement, setLieuPaiement] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  const reste = Math.max(0, (parseFloat(montantTotal) || 0) - (parseFloat(montantPaye) || 0));
+
+  const handleSubmit = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const { repertoire, sequence_number } = await getNextRepertoire();
+      const now = new Date().toISOString();
+      const payload = {
+        repertoire, sequence_number,
+        type_op: typeOp,
+        marchandise,
+        equipement,
+        equipement_autre: equipement === "Autre" ? equipementAutre : null,
+        statut_avd: "Soumis", statut_avd_changed_at: now,
+        statuts_licences: [],
+        exo_licence160: null, exo_attestation: null,
+        declaration_etat: "Non tirée",
+        montant_total: parseFloat(montantTotal) || 0,
+        montant_paye: parseFloat(montantPaye) || 0,
+        payeur: payeur,
+        lieu_paiement: lieuPaiement,
+      };
+      const { data, error: insertError } = await supabase.from("dossiers").insert(payload).select().single();
+      if (insertError) throw insertError;
+      onCreate(data);
+    } catch (e) {
+      setError("Impossible de créer le dossier. Vérifiez la connexion et réessayez.");
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ maxWidth: 640, margin: "0 auto" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 22 }}>
+        <button onClick={onCancel} style={{ background: "none", border: "none", cursor: "pointer", padding: 6, borderRadius: 8, display: "flex" }}>
+          <Icon name="arrow-left" size={20} color={MUTED} />
+        </button>
+        <div>
+          <div style={{ fontSize: 11, color: MUTED, textTransform: "uppercase", letterSpacing: "0.06em" }}>Nouveau dossier</div>
+          <div style={{ fontSize: 20, fontWeight: 700, color: PAPER }}>Le numéro sera attribué à la création</div>
+        </div>
+      </div>
+
+      <div style={{ background: INK_2, border: "1px solid rgba(255,255,255,0.08)", borderRadius: 16, padding: 24 }}>
+        <Field label="Type d'opération">
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {TYPES_OP.map((t) => <div key={t} style={selectChipStyle(typeOp === t)} onClick={() => setTypeOp(t)}>{t}</div>)}
+          </div>
+        </Field>
+
+        <Field label="Marchandise">
+          <input style={inputStyle} placeholder="Ex : Pièces détachées auto" value={marchandise} onChange={(e) => setMarchandise(e.target.value)} />
+        </Field>
+
+        <Field label="Équipement">
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {EQUIPEMENTS.map((t) => <div key={t} style={selectChipStyle(equipement === t)} onClick={() => setEquipement(t)}>{t}</div>)}
+          </div>
+          {equipement === "Autre" && (
+            <input style={{ ...inputStyle, marginTop: 10 }} placeholder="Préciser l'équipement" value={equipementAutre} onChange={(e) => setEquipementAutre(e.target.value)} />
+          )}
+        </Field>
+
+        <div style={{ height: 1, background: "rgba(196,149,42,0.3)", margin: "20px 0" }} />
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+          <Field label="Montant total (FCFA)">
+            <input style={inputStyle} type="number" placeholder="0" value={montantTotal} onChange={(e) => setMontantTotal(e.target.value)} />
+          </Field>
+          <Field label="Montant payé (FCFA)">
+            <input style={inputStyle} type="number" placeholder="0" value={montantPaye} onChange={(e) => setMontantPaye(e.target.value)} />
+          </Field>
+        </div>
+
+        <Field label="Payé par">
+          <div style={{ display: "flex", gap: 8 }}>
+            {PAYEURS.map((p) => <div key={p} style={selectChipStyle(payeur === p)} onClick={() => setPayeur(p)}>{p}</div>)}
+          </div>
+        </Field>
+
+        <Field label="Lieu de paiement">
+          <input style={inputStyle} placeholder="Ex : Agence Cotonou" value={lieuPaiement} onChange={(e) => setLieuPaiement(e.target.value)} />
+        </Field>
+
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 14px", background: "rgba(229,72,77,0.08)", border: "1px solid rgba(229,72,77,0.25)", borderRadius: 10 }}>
+          <span style={{ fontSize: 13, color: "#FF8A8D", fontWeight: 600 }}>Reste à payer (calcul automatique)</span>
+          <span style={{ fontSize: 16, fontWeight: 700, color: "#FF8A8D" }}>{fmtFCFA(reste)}</span>
+        </div>
+
+        {error && <div style={{ fontSize: 12.5, color: "#FF8A8D", marginTop: 10 }}>{error}</div>}
+
+        <button onClick={handleSubmit} disabled={saving} style={{
+          width: "100%", marginTop: 22, padding: "13px", borderRadius: 11, border: "none", background: GOLD, color: INK,
+          fontSize: 14.5, fontWeight: 700, cursor: saving ? "not-allowed" : "pointer", display: "flex",
+          alignItems: "center", justifyContent: "center", gap: 8, opacity: saving ? 0.7 : 1,
+        }}>
+          {saving ? <Icon name="loader-2" size={16} color={INK} style={{ animation: "spin 1s linear infinite" }} /> : <Icon name="file-check" size={16} color={INK} />}
+          {saving ? "Création…" : "Créer le dossier"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Détail dossier ---------- */
+function DossierDetail({ dossier, onBack, onUpdate }) {
+  const [d, setD] = useState(dossier);
+  const [syncing, setSyncing] = useState(false);
+  const urgency = urgencyOf(d);
+
+  useEffect(() => { setD(dossier); }, [dossier]);
+
+  const update = async (patch) => {
+    const previous = d;
+    setD({ ...d, ...patch });
+    setSyncing(true);
+    const { data, error } = await supabase.from("dossiers").update(patch).eq("id", d.id).select().single();
+    setSyncing(false);
+    if (error) { setD(previous); return; }
+    setD(data);
+    onUpdate(data);
+  };
+
+  const setAvd = (statut) => update({ statut_avd: statut, statut_avd_changed_at: new Date().toISOString() });
+
+  const toggleLicence = (type) => {
+    const exists = (d.statuts_licences || []).find((l) => l.type === type);
+    const statuts_licences = exists
+      ? d.statuts_licences.filter((l) => l.type !== type)
+      : [...(d.statuts_licences || []), { type, statut: "À payer" }];
+    update({ statuts_licences, licences_changed_at: new Date().toISOString() });
+  };
+
+  const setLicenceStatut = (type, statut) => {
+    const statuts_licences = (d.statuts_licences || []).map((l) => (l.type === type ? { ...l, statut } : l));
+    update({ statuts_licences, licences_changed_at: new Date().toISOString() });
+  };
+
+  const setDeclaration = (statut) => {
+    const now = new Date().toISOString();
+    const patch = { declaration_etat: statut };
+    if (statut === "Tirée" && !d.declaration_tiree_at) patch.declaration_tiree_at = now;
+    if (statut === "USN émis") patch.usn_emis_at = now;
+    if (statut === "USN payée") patch.usn_paye_at = now;
+    update(patch);
+  };
+
+  const reste = (d.montant_total || 0) - (d.montant_paye || 0);
+
+  return (
+    <div style={{ maxWidth: 760, margin: "0 auto" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20, flexWrap: "wrap", gap: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <button onClick={onBack} style={{ background: "none", border: "none", cursor: "pointer", padding: 6, borderRadius: 8, display: "flex" }}>
+            <Icon name="arrow-left" size={20} color={MUTED} />
+          </button>
+          <div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: PAPER, fontFamily: "ui-monospace, monospace" }}>{d.repertoire}</div>
+            <div style={{ fontSize: 12.5, color: MUTED }}>{d.marchandise} · {d.type_op} · {d.equipement}</div>
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {syncing && (
+            <span style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, color: MUTED }}>
+              <Icon name="loader-2" size={12} color={MUTED} style={{ animation: "spin 1s linear infinite" }} /> Synchronisation…
+            </span>
+          )}
+          {urgency === "red" && <Badge tone="red"><Icon name="alert-triangle" size={12} color="#FF8A8D" />Retard 48h+</Badge>}
+          {urgency === "yellow" && <Badge tone="amber"><Icon name="clock" size={12} color={AMBER} />En requête</Badge>}
+        </div>
+      </div>
+
+      <ModuleCard icon="shield-check" title="AVD">
+        <StatusPicker options={AVD_STATUTS} value={d.statut_avd} onChange={setAvd} />
+        {d.statut_avd === "En requête" && (
+          <div style={{ marginTop: 10, fontSize: 12, color: AMBER }}>En requête depuis {timeAgo(d.statut_avd_changed_at)}</div>
+        )}
+      </ModuleCard>
+
+      <ModuleCard icon="file-check" title="Licences">
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+          {LICENCE_TYPES.map((t) => {
+            const active = (d.statuts_licences || []).some((l) => l.type === t);
+            return (
+              <div key={t} onClick={() => toggleLicence(t)} style={{
+                padding: "7px 13px", borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+                border: "1px solid " + (active ? GOLD : "rgba(255,255,255,0.1)"),
+                background: active ? "rgba(196,149,42,0.16)" : "rgba(255,255,255,0.02)",
+                color: active ? GOLD : MUTED,
+              }}>Licence {t}</div>
+            );
+          })}
+        </div>
+        {(d.statuts_licences || []).map((l) => (
+          <div key={l.type} style={{ marginBottom: 12, paddingLeft: 12, borderLeft: "2px solid rgba(196,149,42,0.3)" }}>
+            <div style={{ fontSize: 12, color: GOLD, fontWeight: 700, marginBottom: 6 }}>Licence {l.type}</div>
+            <StatusPicker options={LICENCE_STATUTS} value={l.statut} onChange={(s) => setLicenceStatut(l.type, s)} danger="En suspens" />
+          </div>
+        ))}
+        {(d.statuts_licences || []).length === 0 && <div style={{ fontSize: 12.5, color: MUTED }}>Aucune licence sélectionnée.</div>}
+      </ModuleCard>
+
+      <ModuleCard icon="shield-check" title="Exonération">
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 12, color: MUTED, fontWeight: 600, marginBottom: 6 }}>Licence 160</div>
+          <StatusPicker options={EXO_STATUTS} value={d.exo_licence160} onChange={(s) => update({ exo_licence160: s })} />
+        </div>
+        <div>
+          <div style={{ fontSize: 12, color: MUTED, fontWeight: 600, marginBottom: 6 }}>Attestation d'exonération</div>
+          <StatusPicker options={EXO_STATUTS} value={d.exo_attestation} onChange={(s) => update({ exo_attestation: s })} />
+        </div>
+      </ModuleCard>
+
+      <ModuleCard icon="receipt" title="Déclaration">
+        <StatusPicker options={DECL_STATUTS} value={d.declaration_etat} onChange={setDeclaration} danger="Tirée" />
+        {d.declaration_tiree_at && (
+          <div style={{ marginTop: 10, fontSize: 12, color: d.declaration_etat !== "USN payée" && d.declaration_etat !== "Clôturée" ? AMBER : MUTED }}>
+            Tirée depuis {timeAgo(d.declaration_tiree_at)}
+            {d.declaration_etat !== "USN payée" && d.declaration_etat !== "Clôturée" && " · USN en attente de paiement"}
+          </div>
+        )}
+      </ModuleCard>
+
+      <ModuleCard icon="wallet" title="Paiement">
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+          <Field label="Montant total">
+            <input style={inputStyle} type="number" value={d.montant_total} onChange={(e) => update({ montant_total: parseFloat(e.target.value) || 0 })} />
+          </Field>
+          <Field label="Montant payé">
+            <input style={inputStyle} type="number" value={d.montant_paye} onChange={(e) => update({ montant_paye: parseFloat(e.target.value) || 0 })} />
+          </Field>
+        </div>
+        <Field label="Payé par">
+          <div style={{ display: "flex", gap: 8 }}>
+            {PAYEURS.map((p) => (
+              <div key={p} style={selectChipStyle(d.payeur === p)} onClick={() => update({ payeur: p })}>{p}</div>
+            ))}
+          </div>
+        </Field>
+        <Field label="Lieu de paiement">
+          <input style={inputStyle} value={d.lieu_paiement || ""} onChange={(e) => update({ lieu_paiement: e.target.value })} />
+        </Field>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 14px", background: reste > 0 ? "rgba(229,72,77,0.08)" : "rgba(63,201,138,0.08)", border: "1px solid " + (reste > 0 ? "rgba(229,72,77,0.25)" : "rgba(63,201,138,0.25)"), borderRadius: 10 }}>
+          <span style={{ fontSize: 13, fontWeight: 600, color: reste > 0 ? "#FF8A8D" : GREEN }}>Reste à payer</span>
+          <span style={{ fontSize: 16, fontWeight: 700, color: reste > 0 ? "#FF8A8D" : GREEN }}>{fmtFCFA(reste)}</span>
+        </div>
+      </ModuleCard>
+    </div>
+  );
+}
+
+/* ---------- Dashboard ---------- */
+function Dashboard({ dossiers, startSequence, onOpen, onNew, onEditStart }) {
+  const [filterOp, setFilterOp] = useState("Tous");
+  const [filterUrgency, setFilterUrgency] = useState("Tous");
+  const [search, setSearch] = useState("");
+
+  const withUrgency = dossiers.map((d) => ({ ...d, _urgency: urgencyOf(d) }));
+  const red = withUrgency.filter((d) => d._urgency === "red").length;
+  const yellow = withUrgency.filter((d) => d._urgency === "yellow").length;
+  const resteTotal = dossiers.reduce((s, d) => s + Math.max(0, (d.montant_total || 0) - (d.montant_paye || 0)), 0);
+
+  const filtered = withUrgency
+    .filter((d) => filterOp === "Tous" || d.type_op === filterOp)
+    .filter((d) => filterUrgency === "Tous" || d._urgency === filterUrgency)
+    .filter((d) => !search || d.repertoire.toLowerCase().includes(search.toLowerCase()) || (d.marchandise || "").toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => b.sequence_number - a.sequence_number);
+
+  return (
+    <div style={{ maxWidth: 980, margin: "0 auto" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 22, flexWrap: "wrap", gap: 14 }}>
+        <div>
+          <div style={{ fontSize: 11, color: GOLD, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700, marginBottom: 4 }}>Bureau de Transit</div>
+          <h1 style={{ fontSize: 26, fontWeight: 700, color: PAPER, margin: 0 }}>Suivi des dossiers</h1>
+          <div style={{ fontSize: 12, color: MUTED, marginTop: 4 }}>Répertoire à partir de OK26{startSequence}SS</div>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          {dossiers.length === 0 && (
+            <button onClick={onEditStart} title="Modifier le point de départ" style={{
+              display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 11,
+              border: "1px solid rgba(255,255,255,0.12)", background: "transparent", color: MUTED, cursor: "pointer",
+            }}><Icon name="settings" size={16} color={MUTED} /></button>
+          )}
+          <button onClick={onNew} style={{
+            display: "flex", alignItems: "center", gap: 8, padding: "11px 18px", borderRadius: 11,
+            border: "none", background: GOLD, color: INK, fontSize: 14, fontWeight: 700, cursor: "pointer",
+          }}><Icon name="plus" size={17} color={INK} /> Nouveau dossier</button>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 12, marginBottom: 22, flexWrap: "wrap" }}>
+        <StatPill label="Dossiers actifs" value={dossiers.length} tone="gold" />
+        <StatPill label="Alertes rouges" value={red} tone="red" />
+        <StatPill label="En surveillance" value={yellow} tone="amber" />
+        <StatPill label="Reste à percevoir" value={fmtFCFA(resteTotal)} tone="muted" />
+      </div>
+
+      <div style={{ display: "flex", gap: 10, marginBottom: 18, flexWrap: "wrap", alignItems: "center" }}>
+        <div style={{ position: "relative", flex: "1 1 220px" }}>
+          <Icon name="search" size={15} color={MUTED} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)" }} />
+          <input placeholder="Rechercher un répertoire, une marchandise…" value={search} onChange={(e) => setSearch(e.target.value)} style={{ ...inputStyle, paddingLeft: 36 }} />
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {["Tous", ...TYPES_OP].map((t) => <div key={t} onClick={() => setFilterOp(t)} style={selectChipStyle(filterOp === t)}>{t}</div>)}
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          <div onClick={() => setFilterUrgency(filterUrgency === "red" ? "Tous" : "red")} style={{
+            ...selectChipStyle(filterUrgency === "red"),
+            borderColor: filterUrgency === "red" ? RED : "rgba(255,255,255,0.12)",
+            color: filterUrgency === "red" ? "#FF8A8D" : MUTED,
+            background: filterUrgency === "red" ? "rgba(229,72,77,0.14)" : "rgba(255,255,255,0.03)",
+          }}><Icon name="alert-triangle" size={13} color={filterUrgency === "red" ? "#FF8A8D" : MUTED} style={{ marginRight: 5 }} />Rouge</div>
+          <div onClick={() => setFilterUrgency(filterUrgency === "yellow" ? "Tous" : "yellow")} style={{
+            ...selectChipStyle(filterUrgency === "yellow"),
+            borderColor: filterUrgency === "yellow" ? AMBER : "rgba(255,255,255,0.12)",
+            color: filterUrgency === "yellow" ? AMBER : MUTED,
+            background: filterUrgency === "yellow" ? "rgba(245,185,61,0.14)" : "rgba(255,255,255,0.03)",
+          }}><Icon name="clock" size={13} color={filterUrgency === "yellow" ? AMBER : MUTED} style={{ marginRight: 5 }} />Jaune</div>
+        </div>
+      </div>
+
+      {filtered.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "60px 20px", color: MUTED }}>
+          <Icon name="package" size={32} color={MUTED} style={{ marginBottom: 12 }} />
+          <div style={{ fontSize: 14 }}>{dossiers.length === 0 ? "Aucun dossier pour le moment. Créez le premier." : "Aucun dossier ne correspond à ces critères."}</div>
+        </div>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 14 }}>
+          {filtered.map((d) => <DossierCard key={d.id} d={d} onOpen={onOpen} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------- App racine ---------- */
+function App() {
+  const [dossiers, setDossiers] = useState([]);
+  const [startSequence, setStartSequence] = useState(undefined);
+  const [view, setView] = useState("dashboard");
+  const [activeId, setActiveId] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [connError, setConnError] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [start, res] = await Promise.all([
+          fetchStartSequence(),
+          supabase.from("dossiers").select("*").order("sequence_number", { ascending: false }),
+        ]);
+        if (res.error) throw res.error;
+        if (cancelled) return;
+        setStartSequence(start);
+        setDossiers(res.data || []);
+      } catch (e) {
+        if (!cancelled) setConnError(true);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    const channel = supabase
+      .channel("dossiers-realtime")
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "dossiers" }, (payload) => {
+        setDossiers((prev) => (prev.some((d) => d.id === payload.new.id) ? prev : [payload.new, ...prev]));
+      })
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "dossiers" }, (payload) => {
+        setDossiers((prev) => prev.map((d) => (d.id === payload.new.id ? payload.new : d)));
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, []);
+
+  const openDossier = (d) => { setActiveId(d.id); setView("detail"); };
+  const createDossier = (d) => {
+    setDossiers((prev) => (prev.some((x) => x.id === d.id) ? prev : [d, ...prev]));
+    setActiveId(d.id);
+    setView("detail");
+  };
+  const updateDossier = (updated) => setDossiers((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
+  const activeDossier = dossiers.find((d) => d.id === activeId);
+
+  if (loading) {
+    return (
+      <div style={{ minHeight: "100vh", background: INK, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <Icon name="loader-2" size={22} color={GOLD} style={{ animation: "spin 1s linear infinite" }} />
+      </div>
+    );
+  }
+
+  if (connError) {
+    return (
+      <div style={{ minHeight: "100vh", background: INK, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+        <div style={{ maxWidth: 380, textAlign: "center" }}>
+          <Icon name="alert-triangle" size={28} color={RED} style={{ marginBottom: 12 }} />
+          <div style={{ fontSize: 15, fontWeight: 700, color: PAPER, marginBottom: 8 }}>Connexion impossible</div>
+          <div style={{ fontSize: 13, color: MUTED, lineHeight: 1.5 }}>
+            Impossible de joindre la base de données. Vérifiez que le script SQL a bien été exécuté dans Supabase et que la connexion internet fonctionne.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ minHeight: "100vh", background: INK, fontFamily: "-apple-system, BlinkMacSystemFont, 'Inter', sans-serif" }}>
+      <div style={{ borderBottom: "1px solid rgba(255,255,255,0.06)", padding: "16px 24px", position: "sticky", top: 0, background: INK, zIndex: 10 }}>
+        <div style={{ maxWidth: 980, margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ width: 30, height: 30, borderRadius: 8, background: GOLD, display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <Icon name="package" size={16} color={INK} />
+            </div>
+            <span style={{ fontSize: 15, fontWeight: 700, color: PAPER }}>Bureau de Transit</span>
+          </div>
+          <div style={{ fontSize: 12, color: MUTED, display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ width: 7, height: 7, borderRadius: "50%", background: GREEN, display: "inline-block" }} />
+            <span className="hidden sm:inline">Synchronisé en temps réel</span>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ padding: "28px 16px 60px" }} className="sm:!px-6">
+        {startSequence === null ? (
+          <StartSequenceSetup onConfirm={(n) => setStartSequence(n)} />
+        ) : (
+          <React.Fragment>
+            {view === "dashboard" && (
+              <Dashboard dossiers={dossiers} startSequence={startSequence} onOpen={openDossier} onNew={() => setView("new")} onEditStart={() => setStartSequence(null)} />
+            )}
+            {view === "new" && <NewDossierForm onCancel={() => setView("dashboard")} onCreate={createDossier} />}
+            {view === "detail" && activeDossier && <DossierDetail dossier={activeDossier} onBack={() => setView("dashboard")} onUpdate={updateDossier} />}
+          </React.Fragment>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
