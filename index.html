@@ -95,8 +95,17 @@ const AVD_STATUTS = ["Soumis", "En suspens", "En requête", "Resoumis", "Validé
 const LICENCE_TYPES = ["137", "155", "151", "153", "129", "Autre"];
 const LICENCE_STATUTS = ["À payer", "Soumis", "En suspens", "Approuvée", "Expirée"];
 const EXO_STATUTS = ["Soumis", "En suspens", "Resoumis", "Approuvée"];
-const DECL_STATUTS = ["Non tirée", "Tirée", "Suivi en cours", "USN émis", "USN payée", "Clôturée"];
-const PAYEURS = ["Boss", "Agent"];
+const DECL_STATUTS2 = ["Tirée", "Suivi en cours", "Clôturée"];
+const SUIVI_FINAL_STATUTS = ["Déclaration liquidée", "USN émis", "USN payé", "Clôturé"];
+const PARCOURS = [
+  { key: "AVD", label: "AVD" },
+  { key: "Exoneration", label: "Exonération" },
+  { key: "Declaration_directe", label: "Déclaration directe" },
+];
+const NIVEAUX = ["Nouveau", "AVD", "Exoneration", "Declaration", "Suivi_final"];
+const NIVEAU_LABEL = { Nouveau: "Nouveau dossier", AVD: "AVD", Exoneration: "Exonération", Declaration: "Déclaration", Suivi_final: "Suivi final" };
+const NOUVEAU_DOSSIER_STATUTS = ["Complet", "En attente de documents"];
+const PAYE_CHEZ_DEFAUT = ["Boss", "Agent"];
 
 /* =========================================================
    Icônes SVG inline — zéro dépendance externe, zéro risque
@@ -130,6 +139,11 @@ const IconTruck = svgIcon(<><path d="M14 18V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v11a1
 const IconContainer = svgIcon(<><path d="M22 7.7c0-.6-.4-1.2-.8-1.5l-6.3-3.9a1.72 1.72 0 0 0-1.7 0l-10.3 6c-.5.3-.9.9-.9 1.5v6.6c0 .6.4 1.2.8 1.5l6.3 3.9a1.72 1.72 0 0 0 1.7 0l10.3-6c.5-.3.9-.9.9-1.5Z"/><path d="M10 21.9V14L2.1 9.1"/><path d="m10 14 11.9-6.9"/><path d="M14 19.8v-8.1"/><path d="M18 17.5V9.4"/></>);
 const IconSettings = svgIcon(<><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2Z"/><circle cx="12" cy="12" r="3"/></>);
 const IconWallet = svgIcon(<><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></>);
+const IconFilter = svgIcon(<><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></>);
+const IconUser = svgIcon(<><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></>);
+const IconCheck = svgIcon(<><path d="M20 6 9 17l-5-5"/></>);
+const IconX = svgIcon(<><path d="M18 6 6 18"/><path d="m6 6 12 12"/></>);
+const IconChevronRight = svgIcon(<><path d="m9 18 6-6-6-6"/></>);
 
 /* ---------- Utilitaires ---------- */
 function hoursSince(dateStr) {
@@ -140,11 +154,15 @@ function hoursSince(dateStr) {
 function urgencyOf(d) {
   const avdReq = d.statut_avd === "En requête";
   const licReq = (d.statuts_licences || []).some((l) => l.statut === "En requête");
+  const exoReq = d.exo_licence160 === "En suspens" || d.exo_attestation === "En suspens";
   let red = false, yellow = false;
   if (avdReq || licReq) {
     yellow = true;
     const h = hoursSince(d.statut_avd_changed_at);
     if (h !== null && h > 48) red = true;
+  }
+  if (exoReq) {
+    yellow = true;
   }
   if (red) return "red";
   if (yellow) return "yellow";
@@ -172,6 +190,11 @@ async function getNextRepertoire() {
 
 async function setStartSequenceRemote(n) {
   const { error } = await supabase.rpc("set_start_sequence", { p_start: n });
+  if (error) throw error;
+}
+
+async function forceStartSequenceRemote(n) {
+  const { error } = await supabase.rpc("force_start_sequence", { p_start: n });
   if (error) throw error;
 }
 
@@ -258,6 +281,17 @@ function StatPill({ label, value, tone }) {
   );
 }
 
+function Toggle({ on, onChange, label }) {
+  return (
+    <div onClick={() => onChange(!on)} style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
+      {label && <span style={{ fontSize: 13, color: PAPER, fontWeight: 600 }}>{label}</span>}
+      <div style={{ width: 40, height: 22, borderRadius: 999, background: on ? GOLD : "rgba(255,255,255,0.15)", position: "relative", transition: "background .15s", flexShrink: 0 }}>
+        <div style={{ width: 18, height: 18, borderRadius: "50%", background: INK, position: "absolute", top: 2, left: on ? 20 : 2, transition: "left .15s" }} />
+      </div>
+    </div>
+  );
+}
+
 /* ---------- Configuration point de départ ---------- */
 function StartSequenceSetup({ onConfirm }) {
   const [value, setValue] = useState("");
@@ -319,9 +353,10 @@ function StartSequenceSetup({ onConfirm }) {
 function DossierCard({ d, onOpen }) {
   const urgency = urgencyOf(d);
   const OpIcon = { Import: IconArrowDownRight, Export: IconArrowUpRight, Transit: IconArrowRightLeft }[d.type_op] || IconPackage;
-  const EquipIcon = { "20'": IconContainer, "40'": IconContainer, "Roulant": IconTruck, "Autre": IconPackage }[d.equipement] || IconPackage;
   const reste = (d.montant_total || 0) - (d.montant_paye || 0);
   const borderColor = urgency === "red" ? "rgba(229,72,77,0.55)" : urgency === "yellow" ? "rgba(245,185,61,0.5)" : "rgba(255,255,255,0.08)";
+  const equipLabel = [d.nb_conteneurs_20 ? d.nb_conteneurs_20 + "x20'" : null, d.nb_conteneurs_40 ? d.nb_conteneurs_40 + "x40'" : null].filter(Boolean).join(" · ");
+  const paiementOk = d.paiement_simple === false ? reste <= 0 : d.paye;
 
   return (
     <button onClick={() => onOpen(d)} style={{
@@ -331,7 +366,7 @@ function DossierCard({ d, onOpen }) {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
         <div style={{ display: "flex", gap: 12, minWidth: 0 }}>
           <div style={{ width: 38, height: 38, borderRadius: 10, flexShrink: 0, background: "rgba(196,149,42,0.1)", border: "1px solid rgba(196,149,42,0.25)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <EquipIcon size={18} color={GOLD} />
+            <IconUser size={18} color={GOLD} />
           </div>
           <div style={{ minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -339,19 +374,23 @@ function DossierCard({ d, onOpen }) {
               {urgency === "red" && <Badge tone="red"><IconAlertTriangle size={11} color="#FF8A8D" />48h+</Badge>}
               {urgency === "yellow" && <Badge tone="amber"><IconClock size={11} color={AMBER} />En requête</Badge>}
             </div>
-            <div style={{ fontSize: 13, color: MUTED, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {d.marchandise || "Marchandise non précisée"}
-            </div>
+            <div style={{ fontSize: 13.5, color: PAPER, fontWeight: 600, marginTop: 2 }}>{d.client_nom || "Client non précisé"}</div>
+            {d.description_note && (
+              <div style={{ fontSize: 11.5, color: MUTED, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.description_note}</div>
+            )}
           </div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-          <OpIcon size={14} color={GOLD} />
-          <span style={{ fontSize: 12.5, color: PAPER, fontWeight: 600 }}>{d.type_op}</span>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <OpIcon size={14} color={GOLD} />
+            <span style={{ fontSize: 12.5, color: PAPER, fontWeight: 600 }}>{d.type_op}</span>
+          </div>
+          {equipLabel && <span style={{ fontSize: 11, color: MUTED }}>{equipLabel}</span>}
         </div>
       </div>
 
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: MUTED, margin: "14px 0 6px" }}>
-        <span>AVD</span><span>{d.statut_avd}</span>
+        <span>Niveau</span><span style={{ color: GOLD, fontWeight: 600 }}>{NIVEAU_LABEL[d.niveau_actuel] || "Nouveau dossier"}</span>
       </div>
 
       <div style={{ height: 1, background: "rgba(255,255,255,0.08)", margin: "10px 0 14px" }} />
@@ -359,13 +398,18 @@ function DossierCard({ d, onOpen }) {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ display: "flex", gap: 14 }}>
           <div>
-            <div style={{ fontSize: 10.5, color: MUTED, textTransform: "uppercase" }}>Reste à payer</div>
-            <div style={{ fontSize: 14, fontWeight: 700, color: reste > 0 ? "#FF8A8D" : GREEN }}>{fmtFCFA(reste)}</div>
+            <div style={{ fontSize: 10.5, color: MUTED, textTransform: "uppercase" }}>Paiement</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: paiementOk ? GREEN : "#FF8A8D", display: "flex", alignItems: "center", gap: 4 }}>
+              {paiementOk ? <IconCheck size={13} color={GREEN} /> : <IconX size={13} color="#FF8A8D" />}
+              {paiementOk ? "Payé" : (d.paiement_simple === false ? fmtFCFA(reste) + " restant" : "Non payé")}
+            </div>
           </div>
-          <div>
-            <div style={{ fontSize: 10.5, color: MUTED, textTransform: "uppercase" }}>Déclaration</div>
-            <div style={{ fontSize: 13, fontWeight: 600, color: PAPER }}>{d.declaration_etat}</div>
-          </div>
+          {d.numero_bl && (
+            <div>
+              <div style={{ fontSize: 10.5, color: MUTED, textTransform: "uppercase" }}>BL</div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: PAPER }}>{d.numero_bl}</div>
+            </div>
+          )}
         </div>
       </div>
     </button>
@@ -374,20 +418,34 @@ function DossierCard({ d, onOpen }) {
 
 /* ---------- Formulaire nouveau dossier ---------- */
 function NewDossierForm({ onCancel, onCreate }) {
+  const [parcours, setParcours] = useState("AVD");
+  const [nouveauStatut, setNouveauStatut] = useState("En attente de documents");
+  const [clientNom, setClientNom] = useState("");
+  const [descriptionNote, setDescriptionNote] = useState("");
+  const [numeroBl, setNumeroBl] = useState("");
   const [typeOp, setTypeOp] = useState("Import");
-  const [marchandise, setMarchandise] = useState("");
-  const [equipement, setEquipement] = useState("20'");
-  const [equipementAutre, setEquipementAutre] = useState("");
+  const [typeMarchandise, setTypeMarchandise] = useState("");
+  const [nb20, setNb20] = useState("");
+  const [nb40, setNb40] = useState("");
+  const [paiementSimple, setPaiementSimple] = useState(true);
+  const [paye, setPaye] = useState(false);
   const [montantTotal, setMontantTotal] = useState("");
   const [montantPaye, setMontantPaye] = useState("");
-  const [payeur, setPayeur] = useState("Boss");
-  const [lieuPaiement, setLieuPaiement] = useState("");
+  const [payeChez, setPayeChez] = useState("Boss");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
   const reste = Math.max(0, (parseFloat(montantTotal) || 0) - (parseFloat(montantPaye) || 0));
+  const clientValid = clientNom.trim() !== "";
+
+  const niveauDepart = () => {
+    if (parcours === "AVD") return "AVD";
+    if (parcours === "Exoneration") return "Exoneration";
+    return "Declaration";
+  };
 
   const handleSubmit = async () => {
+    if (!clientValid) { setError("Le nom du client est obligatoire."); return; }
     setSaving(true);
     setError(null);
     try {
@@ -395,18 +453,29 @@ function NewDossierForm({ onCancel, onCreate }) {
       const now = new Date().toISOString();
       const payload = {
         repertoire, sequence_number,
+        parcours,
+        niveau_actuel: niveauDepart(),
+        nouveau_dossier_statut: nouveauStatut,
+        client_nom: clientNom.trim(),
+        description_note: descriptionNote || null,
+        numero_bl: numeroBl || null,
         type_op: typeOp,
-        marchandise,
-        equipement,
-        equipement_autre: equipement === "Autre" ? equipementAutre : null,
-        statut_avd: "Soumis", statut_avd_changed_at: now,
+        type_marchandise: typeMarchandise || null,
+        marchandise: typeMarchandise || null, // compat champ historique
+        nb_conteneurs_20: parseInt(nb20, 10) || 0,
+        nb_conteneurs_40: parseInt(nb40, 10) || 0,
+        statut_avd: parcours === "AVD" ? "Soumis" : null,
+        statut_avd_changed_at: parcours === "AVD" ? now : null,
         statuts_licences: [],
-        exo_licence160: null, exo_attestation: null,
-        declaration_etat: "Non tirée",
+        exo_licence160: parcours === "Exoneration" ? "Soumis" : null,
+        exo_attestation: parcours === "Exoneration" ? "Soumis" : null,
+        declaration_statut2: parcours === "Declaration_directe" ? "Tirée" : null,
+        declaration_tiree_at: parcours === "Declaration_directe" ? now : null,
+        paiement_simple: paiementSimple,
+        paye: paiementSimple ? paye : false,
         montant_total: parseFloat(montantTotal) || 0,
         montant_paye: parseFloat(montantPaye) || 0,
-        payeur: payeur,
-        lieu_paiement: lieuPaiement,
+        paye_chez: payeChez,
       };
       const { data, error: insertError } = await supabase.from("dossiers").insert(payload).select().single();
       if (insertError) throw insertError;
@@ -430,50 +499,101 @@ function NewDossierForm({ onCancel, onCreate }) {
       </div>
 
       <div style={{ background: INK_2, border: "1px solid rgba(255,255,255,0.08)", borderRadius: 16, padding: 24 }}>
+        <Field label="Parcours du dossier">
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {PARCOURS.map((p) => <div key={p.key} style={selectChipStyle(parcours === p.key)} onClick={() => setParcours(p.key)}>{p.label}</div>)}
+          </div>
+        </Field>
+
+        <Field label="État du dossier">
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {NOUVEAU_DOSSIER_STATUTS.map((s) => <div key={s} style={selectChipStyle(nouveauStatut === s)} onClick={() => setNouveauStatut(s)}>{s}</div>)}
+          </div>
+        </Field>
+
+        <div style={{ height: 1, background: "rgba(196,149,42,0.3)", margin: "20px 0" }} />
+
+        <Field label="Nom du client (obligatoire)">
+          <input style={inputStyle} placeholder="Ex : Société ABC Sarl" value={clientNom} onChange={(e) => setClientNom(e.target.value)} />
+        </Field>
+
+        <Field label="Description / Note (facultatif)">
+          <input style={inputStyle} placeholder="Ex : Client prioritaire, appel avant retrait" value={descriptionNote} onChange={(e) => setDescriptionNote(e.target.value)} />
+        </Field>
+
+        <Field label="Numéro de BL">
+          <input style={inputStyle} placeholder="Ex : MSCU1234567" value={numeroBl} onChange={(e) => setNumeroBl(e.target.value)} />
+        </Field>
+
         <Field label="Type d'opération">
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             {TYPES_OP.map((t) => <div key={t} style={selectChipStyle(typeOp === t)} onClick={() => setTypeOp(t)}>{t}</div>)}
           </div>
         </Field>
 
-        <Field label="Marchandise">
-          <input style={inputStyle} placeholder="Ex : Pièces détachées auto" value={marchandise} onChange={(e) => setMarchandise(e.target.value)} />
+        <Field label="Type de marchandise">
+          <input style={inputStyle} placeholder="Ex : Pièces détachées auto" value={typeMarchandise} onChange={(e) => setTypeMarchandise(e.target.value)} />
         </Field>
 
         <Field label="Équipement">
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            {EQUIPEMENTS.map((t) => <div key={t} style={selectChipStyle(equipement === t)} onClick={() => setEquipement(t)}>{t}</div>)}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+            <div>
+              <label style={{ display: "block", fontSize: 11, color: MUTED, marginBottom: 6 }}>Conteneurs 20'</label>
+              <input style={inputStyle} type="number" min="0" placeholder="0" value={nb20} onChange={(e) => setNb20(e.target.value)} />
+            </div>
+            <div>
+              <label style={{ display: "block", fontSize: 11, color: MUTED, marginBottom: 6 }}>Conteneurs 40'</label>
+              <input style={inputStyle} type="number" min="0" placeholder="0" value={nb40} onChange={(e) => setNb40(e.target.value)} />
+            </div>
           </div>
-          {equipement === "Autre" && (
-            <input style={{ ...inputStyle, marginTop: 10 }} placeholder="Préciser l'équipement" value={equipementAutre} onChange={(e) => setEquipementAutre(e.target.value)} />
-          )}
         </Field>
 
         <div style={{ height: 1, background: "rgba(196,149,42,0.3)", margin: "20px 0" }} />
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-          <Field label="Montant total (FCFA)">
-            <input style={inputStyle} type="number" placeholder="0" value={montantTotal} onChange={(e) => setMontantTotal(e.target.value)} />
-          </Field>
-          <Field label="Montant payé (FCFA)">
-            <input style={inputStyle} type="number" placeholder="0" value={montantPaye} onChange={(e) => setMontantPaye(e.target.value)} />
-          </Field>
+        <div style={{ marginBottom: 16 }}>
+          <Toggle on={!paiementSimple} onChange={(v) => setPaiementSimple(!v)} label="Mode détails (montants)" />
         </div>
 
-        <Field label="Payé par">
+        {paiementSimple ? (
+          <Field label="Paiement">
+            <div style={{ display: "flex", gap: 8 }}>
+              <div onClick={() => setPaye(true)} style={{
+                flex: 1, textAlign: "center", padding: "12px", borderRadius: 10, cursor: "pointer", fontWeight: 700, fontSize: 13.5,
+                border: "1px solid " + (paye ? GREEN : "rgba(255,255,255,0.12)"),
+                background: paye ? "rgba(63,201,138,0.15)" : "rgba(255,255,255,0.03)",
+                color: paye ? GREEN : MUTED,
+              }}><IconCheck size={14} color={paye ? GREEN : MUTED} style={{ marginRight: 6, display: "inline-block", verticalAlign: -2 }} />Payé</div>
+              <div onClick={() => setPaye(false)} style={{
+                flex: 1, textAlign: "center", padding: "12px", borderRadius: 10, cursor: "pointer", fontWeight: 700, fontSize: 13.5,
+                border: "1px solid " + (!paye ? RED : "rgba(255,255,255,0.12)"),
+                background: !paye ? "rgba(229,72,77,0.15)" : "rgba(255,255,255,0.03)",
+                color: !paye ? "#FF8A8D" : MUTED,
+              }}><IconX size={14} color={!paye ? "#FF8A8D" : MUTED} style={{ marginRight: 6, display: "inline-block", verticalAlign: -2 }} />Non payé</div>
+            </div>
+          </Field>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+            <Field label="Montant attendu (FCFA)">
+              <input style={inputStyle} type="number" placeholder="0" value={montantTotal} onChange={(e) => setMontantTotal(e.target.value)} />
+            </Field>
+            <Field label="Montant payé (FCFA)">
+              <input style={inputStyle} type="number" placeholder="0" value={montantPaye} onChange={(e) => setMontantPaye(e.target.value)} />
+            </Field>
+          </div>
+        )}
+
+        <Field label="Payé chez">
           <div style={{ display: "flex", gap: 8 }}>
-            {PAYEURS.map((p) => <div key={p} style={selectChipStyle(payeur === p)} onClick={() => setPayeur(p)}>{p}</div>)}
+            {PAYE_CHEZ_DEFAUT.map((p) => <div key={p} style={selectChipStyle(payeChez === p)} onClick={() => setPayeChez(p)}>{p}</div>)}
           </div>
         </Field>
 
-        <Field label="Lieu de paiement">
-          <input style={inputStyle} placeholder="Ex : Agence Cotonou" value={lieuPaiement} onChange={(e) => setLieuPaiement(e.target.value)} />
-        </Field>
-
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 14px", background: "rgba(229,72,77,0.08)", border: "1px solid rgba(229,72,77,0.25)", borderRadius: 10 }}>
-          <span style={{ fontSize: 13, color: "#FF8A8D", fontWeight: 600 }}>Reste à payer (calcul automatique)</span>
-          <span style={{ fontSize: 16, fontWeight: 700, color: "#FF8A8D" }}>{fmtFCFA(reste)}</span>
-        </div>
+        {!paiementSimple && (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 14px", background: "rgba(229,72,77,0.08)", border: "1px solid rgba(229,72,77,0.25)", borderRadius: 10 }}>
+            <span style={{ fontSize: 13, color: "#FF8A8D", fontWeight: 600 }}>Reste dû (calcul automatique)</span>
+            <span style={{ fontSize: 16, fontWeight: 700, color: "#FF8A8D" }}>{fmtFCFA(reste)}</span>
+          </div>
+        )}
 
         {error && <div style={{ fontSize: 12.5, color: "#FF8A8D", marginTop: 10 }}>{error}</div>}
 
@@ -509,7 +629,11 @@ function DossierDetail({ dossier, onBack, onUpdate }) {
     onUpdate(data);
   };
 
-  const setAvd = (statut) => update({ statut_avd: statut, statut_avd_changed_at: new Date().toISOString() });
+  const setAvd = (statut) => {
+    const patch = { statut_avd: statut, statut_avd_changed_at: new Date().toISOString() };
+    if (statut === "Validé") patch.niveau_actuel = "Declaration";
+    update(patch);
+  };
 
   const toggleLicence = (type) => {
     const exists = (d.statuts_licences || []).find((l) => l.type === type);
@@ -524,16 +648,31 @@ function DossierDetail({ dossier, onBack, onUpdate }) {
     update({ statuts_licences, licences_changed_at: new Date().toISOString() });
   };
 
-  const setDeclaration = (statut) => {
+  const setExo = (field, statut) => {
+    const patch = { [field]: statut };
+    const other = field === "exo_licence160" ? d.exo_attestation : d.exo_licence160;
+    if (statut === "Approuvée" && other === "Approuvée") patch.niveau_actuel = "Declaration";
+    update(patch);
+  };
+
+  const setDeclaration2 = (statut) => {
     const now = new Date().toISOString();
-    const patch = { declaration_etat: statut };
+    const patch = { declaration_statut2: statut };
     if (statut === "Tirée" && !d.declaration_tiree_at) patch.declaration_tiree_at = now;
+    if (statut === "Clôturée") patch.niveau_actuel = "Suivi_final";
+    update(patch);
+  };
+
+  const setSuiviFinal = (statut) => {
+    const now = new Date().toISOString();
+    const patch = { suivi_final_statut: statut, suivi_final_changed_at: now };
     if (statut === "USN émis") patch.usn_emis_at = now;
-    if (statut === "USN payée") patch.usn_paye_at = now;
+    if (statut === "USN payé") patch.usn_paye_at = now;
     update(patch);
   };
 
   const reste = (d.montant_total || 0) - (d.montant_paye || 0);
+  const equipLabel = [d.nb_conteneurs_20 ? d.nb_conteneurs_20 + "x20'" : null, d.nb_conteneurs_40 ? d.nb_conteneurs_40 + "x40'" : null].filter(Boolean).join(" · ");
 
   return (
     <div style={{ maxWidth: 760, margin: "0 auto" }}>
@@ -544,7 +683,7 @@ function DossierDetail({ dossier, onBack, onUpdate }) {
           </button>
           <div>
             <div style={{ fontSize: 20, fontWeight: 700, color: PAPER, fontFamily: "ui-monospace, monospace" }}>{d.repertoire}</div>
-            <div style={{ fontSize: 12.5, color: MUTED }}>{d.marchandise} · {d.type_op} · {d.equipement}</div>
+            <div style={{ fontSize: 12.5, color: MUTED }}>{d.type_op}{equipLabel ? " · " + equipLabel : ""}{d.numero_bl ? " · BL " + d.numero_bl : ""}</div>
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -558,80 +697,129 @@ function DossierDetail({ dossier, onBack, onUpdate }) {
         </div>
       </div>
 
-      <ModuleCard Icon={IconShieldCheck} title="AVD">
-        <StatusPicker options={AVD_STATUTS} value={d.statut_avd} onChange={setAvd} />
-        {d.statut_avd === "En requête" && (
-          <div style={{ marginTop: 10, fontSize: 12, color: AMBER }}>En requête depuis {timeAgo(d.statut_avd_changed_at)}</div>
+      <ModuleCard Icon={IconUser} title="Client">
+        <Field label="Nom du client">
+          <input style={inputStyle} value={d.client_nom || ""} onChange={(e) => update({ client_nom: e.target.value })} />
+        </Field>
+        <Field label="Description / Note">
+          <input style={inputStyle} value={d.description_note || ""} onChange={(e) => update({ description_note: e.target.value })} />
+        </Field>
+        <Field label="Numéro de BL">
+          <input style={inputStyle} value={d.numero_bl || ""} onChange={(e) => update({ numero_bl: e.target.value })} />
+        </Field>
+      </ModuleCard>
+
+      <ModuleCard Icon={IconFileCheck} title="Nouveau dossier">
+        <StatusPicker options={NOUVEAU_DOSSIER_STATUTS} value={d.nouveau_dossier_statut} onChange={(s) => update({ nouveau_dossier_statut: s })} danger="En attente de documents" />
+      </ModuleCard>
+
+      {d.parcours === "AVD" && (
+        <ModuleCard Icon={IconShieldCheck} title="AVD">
+          <StatusPicker options={AVD_STATUTS} value={d.statut_avd} onChange={setAvd} />
+          {d.statut_avd === "En requête" && (
+            <div style={{ marginTop: 10, fontSize: 12, color: AMBER }}>En requête depuis {timeAgo(d.statut_avd_changed_at)}</div>
+          )}
+        </ModuleCard>
+      )}
+
+      {d.parcours === "AVD" && (
+        <ModuleCard Icon={IconFileCheck} title="Licences">
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+            {LICENCE_TYPES.map((t) => {
+              const active = (d.statuts_licences || []).some((l) => l.type === t);
+              return (
+                <div key={t} onClick={() => toggleLicence(t)} style={{
+                  padding: "7px 13px", borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+                  border: "1px solid " + (active ? GOLD : "rgba(255,255,255,0.1)"),
+                  background: active ? "rgba(196,149,42,0.16)" : "rgba(255,255,255,0.02)",
+                  color: active ? GOLD : MUTED,
+                }}>Licence {t}</div>
+              );
+            })}
+          </div>
+          {(d.statuts_licences || []).map((l) => (
+            <div key={l.type} style={{ marginBottom: 12, paddingLeft: 12, borderLeft: "2px solid rgba(196,149,42,0.3)" }}>
+              <div style={{ fontSize: 12, color: GOLD, fontWeight: 700, marginBottom: 6 }}>Licence {l.type}</div>
+              <StatusPicker options={LICENCE_STATUTS} value={l.statut} onChange={(s) => setLicenceStatut(l.type, s)} danger="En suspens" />
+            </div>
+          ))}
+          {(d.statuts_licences || []).length === 0 && <div style={{ fontSize: 12.5, color: MUTED }}>Aucune licence sélectionnée.</div>}
+        </ModuleCard>
+      )}
+
+      {d.parcours === "Exoneration" && (
+        <ModuleCard Icon={IconShieldCheck} title="Exonération">
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 12, color: MUTED, fontWeight: 600, marginBottom: 6 }}>Licence 160</div>
+            <StatusPicker options={EXO_STATUTS} value={d.exo_licence160} onChange={(s) => setExo("exo_licence160", s)} danger="En suspens" />
+          </div>
+          <div>
+            <div style={{ fontSize: 12, color: MUTED, fontWeight: 600, marginBottom: 6 }}>Attestation d'exonération</div>
+            <StatusPicker options={EXO_STATUTS} value={d.exo_attestation} onChange={(s) => setExo("exo_attestation", s)} danger="En suspens" />
+          </div>
+        </ModuleCard>
+      )}
+
+      <ModuleCard Icon={IconReceipt} title="Déclaration">
+        <StatusPicker options={DECL_STATUTS2} value={d.declaration_statut2} onChange={setDeclaration2} danger="Tirée" />
+        {d.declaration_tiree_at && (
+          <div style={{ marginTop: 10, fontSize: 12, color: MUTED }}>Tirée depuis {timeAgo(d.declaration_tiree_at)}</div>
         )}
       </ModuleCard>
 
-      <ModuleCard Icon={IconFileCheck} title="Licences">
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
-          {LICENCE_TYPES.map((t) => {
-            const active = (d.statuts_licences || []).some((l) => l.type === t);
-            return (
-              <div key={t} onClick={() => toggleLicence(t)} style={{
-                padding: "7px 13px", borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
-                border: "1px solid " + (active ? GOLD : "rgba(255,255,255,0.1)"),
-                background: active ? "rgba(196,149,42,0.16)" : "rgba(255,255,255,0.02)",
-                color: active ? GOLD : MUTED,
-              }}>Licence {t}</div>
-            );
-          })}
-        </div>
-        {(d.statuts_licences || []).map((l) => (
-          <div key={l.type} style={{ marginBottom: 12, paddingLeft: 12, borderLeft: "2px solid rgba(196,149,42,0.3)" }}>
-            <div style={{ fontSize: 12, color: GOLD, fontWeight: 700, marginBottom: 6 }}>Licence {l.type}</div>
-            <StatusPicker options={LICENCE_STATUTS} value={l.statut} onChange={(s) => setLicenceStatut(l.type, s)} danger="En suspens" />
-          </div>
-        ))}
-        {(d.statuts_licences || []).length === 0 && <div style={{ fontSize: 12.5, color: MUTED }}>Aucune licence sélectionnée.</div>}
-      </ModuleCard>
-
-      <ModuleCard Icon={IconShieldCheck} title="Exonération">
-        <div style={{ marginBottom: 14 }}>
-          <div style={{ fontSize: 12, color: MUTED, fontWeight: 600, marginBottom: 6 }}>Licence 160</div>
-          <StatusPicker options={EXO_STATUTS} value={d.exo_licence160} onChange={(s) => update({ exo_licence160: s })} />
-        </div>
-        <div>
-          <div style={{ fontSize: 12, color: MUTED, fontWeight: 600, marginBottom: 6 }}>Attestation d'exonération</div>
-          <StatusPicker options={EXO_STATUTS} value={d.exo_attestation} onChange={(s) => update({ exo_attestation: s })} />
-        </div>
-      </ModuleCard>
-
-      <ModuleCard Icon={IconReceipt} title="Déclaration">
-        <StatusPicker options={DECL_STATUTS} value={d.declaration_etat} onChange={setDeclaration} danger="Tirée" />
-        {d.declaration_tiree_at && (
-          <div style={{ marginTop: 10, fontSize: 12, color: d.declaration_etat !== "USN payée" && d.declaration_etat !== "Clôturée" ? AMBER : MUTED }}>
-            Tirée depuis {timeAgo(d.declaration_tiree_at)}
-            {d.declaration_etat !== "USN payée" && d.declaration_etat !== "Clôturée" && " · USN en attente de paiement"}
-          </div>
+      <ModuleCard Icon={IconCheck} title="Suivi final">
+        <StatusPicker options={SUIVI_FINAL_STATUTS} value={d.suivi_final_statut} onChange={setSuiviFinal} danger="" />
+        {d.usn_emis_at && d.suivi_final_statut !== "USN payé" && d.suivi_final_statut !== "Clôturé" && (
+          <div style={{ marginTop: 10, fontSize: 12, color: AMBER }}>USN émis depuis {timeAgo(d.usn_emis_at)} · en attente de paiement</div>
         )}
       </ModuleCard>
 
       <ModuleCard Icon={IconWallet} title="Paiement">
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-          <Field label="Montant total">
-            <input style={inputStyle} type="number" value={d.montant_total} onChange={(e) => update({ montant_total: parseFloat(e.target.value) || 0 })} />
-          </Field>
-          <Field label="Montant payé">
-            <input style={inputStyle} type="number" value={d.montant_paye} onChange={(e) => update({ montant_paye: parseFloat(e.target.value) || 0 })} />
-          </Field>
+        <div style={{ marginBottom: 16 }}>
+          <Toggle on={d.paiement_simple === false} onChange={(v) => update({ paiement_simple: !v })} label="Mode détails (montants)" />
         </div>
-        <Field label="Payé par">
+
+        {d.paiement_simple !== false ? (
+          <Field label="Statut">
+            <div style={{ display: "flex", gap: 8 }}>
+              <div onClick={() => update({ paye: true })} style={{
+                flex: 1, textAlign: "center", padding: "12px", borderRadius: 10, cursor: "pointer", fontWeight: 700, fontSize: 13.5,
+                border: "1px solid " + (d.paye ? GREEN : "rgba(255,255,255,0.12)"),
+                background: d.paye ? "rgba(63,201,138,0.15)" : "rgba(255,255,255,0.03)",
+                color: d.paye ? GREEN : MUTED,
+              }}><IconCheck size={14} color={d.paye ? GREEN : MUTED} style={{ marginRight: 6, display: "inline-block", verticalAlign: -2 }} />Payé</div>
+              <div onClick={() => update({ paye: false })} style={{
+                flex: 1, textAlign: "center", padding: "12px", borderRadius: 10, cursor: "pointer", fontWeight: 700, fontSize: 13.5,
+                border: "1px solid " + (!d.paye ? RED : "rgba(255,255,255,0.12)"),
+                background: !d.paye ? "rgba(229,72,77,0.15)" : "rgba(255,255,255,0.03)",
+                color: !d.paye ? "#FF8A8D" : MUTED,
+              }}><IconX size={14} color={!d.paye ? "#FF8A8D" : MUTED} style={{ marginRight: 6, display: "inline-block", verticalAlign: -2 }} />Non payé</div>
+            </div>
+          </Field>
+        ) : (
+          <React.Fragment>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+              <Field label="Montant attendu">
+                <input style={inputStyle} type="number" value={d.montant_total} onChange={(e) => update({ montant_total: parseFloat(e.target.value) || 0 })} />
+              </Field>
+              <Field label="Montant payé">
+                <input style={inputStyle} type="number" value={d.montant_paye} onChange={(e) => update({ montant_paye: parseFloat(e.target.value) || 0 })} />
+              </Field>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 14px", background: reste > 0 ? "rgba(229,72,77,0.08)" : "rgba(63,201,138,0.08)", border: "1px solid " + (reste > 0 ? "rgba(229,72,77,0.25)" : "rgba(63,201,138,0.25)"), borderRadius: 10, marginBottom: 16 }}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: reste > 0 ? "#FF8A8D" : GREEN }}>Reste dû</span>
+              <span style={{ fontSize: 16, fontWeight: 700, color: reste > 0 ? "#FF8A8D" : GREEN }}>{fmtFCFA(reste)}</span>
+            </div>
+          </React.Fragment>
+        )}
+
+        <Field label="Payé chez">
           <div style={{ display: "flex", gap: 8 }}>
-            {PAYEURS.map((p) => (
-              <div key={p} style={selectChipStyle(d.payeur === p)} onClick={() => update({ payeur: p })}>{p}</div>
+            {PAYE_CHEZ_DEFAUT.map((p) => (
+              <div key={p} style={selectChipStyle(d.paye_chez === p)} onClick={() => update({ paye_chez: p })}>{p}</div>
             ))}
           </div>
         </Field>
-        <Field label="Lieu de paiement">
-          <input style={inputStyle} value={d.lieu_paiement || ""} onChange={(e) => update({ lieu_paiement: e.target.value })} />
-        </Field>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 14px", background: reste > 0 ? "rgba(229,72,77,0.08)" : "rgba(63,201,138,0.08)", border: "1px solid " + (reste > 0 ? "rgba(229,72,77,0.25)" : "rgba(63,201,138,0.25)"), borderRadius: 10 }}>
-          <span style={{ fontSize: 13, fontWeight: 600, color: reste > 0 ? "#FF8A8D" : GREEN }}>Reste à payer</span>
-          <span style={{ fontSize: 16, fontWeight: 700, color: reste > 0 ? "#FF8A8D" : GREEN }}>{fmtFCFA(reste)}</span>
-        </div>
       </ModuleCard>
     </div>
   );
@@ -640,18 +828,21 @@ function DossierDetail({ dossier, onBack, onUpdate }) {
 /* ---------- Dashboard ---------- */
 function Dashboard({ dossiers, startSequence, onOpen, onNew, onEditStart }) {
   const [filterOp, setFilterOp] = useState("Tous");
+  const [filterNiveau, setFilterNiveau] = useState("Tous");
   const [filterUrgency, setFilterUrgency] = useState("Tous");
+  const [alertesActives, setAlertesActives] = useState(true);
   const [search, setSearch] = useState("");
 
-  const withUrgency = dossiers.map((d) => ({ ...d, _urgency: urgencyOf(d) }));
-  const red = withUrgency.filter((d) => d._urgency === "red").length;
-  const yellow = withUrgency.filter((d) => d._urgency === "yellow").length;
+  const withUrgency = dossiers.map((d) => ({ ...d, _urgency: alertesActives ? urgencyOf(d) : null }));
+  const red = dossiers.filter((d) => urgencyOf(d) === "red").length;
+  const yellow = dossiers.filter((d) => urgencyOf(d) === "yellow").length;
   const resteTotal = dossiers.reduce((s, d) => s + Math.max(0, (d.montant_total || 0) - (d.montant_paye || 0)), 0);
 
   const filtered = withUrgency
     .filter((d) => filterOp === "Tous" || d.type_op === filterOp)
+    .filter((d) => filterNiveau === "Tous" || d.niveau_actuel === filterNiveau)
     .filter((d) => filterUrgency === "Tous" || d._urgency === filterUrgency)
-    .filter((d) => !search || d.repertoire.toLowerCase().includes(search.toLowerCase()) || (d.marchandise || "").toLowerCase().includes(search.toLowerCase()))
+    .filter((d) => !search || d.repertoire.toLowerCase().includes(search.toLowerCase()) || (d.client_nom || "").toLowerCase().includes(search.toLowerCase()) || (d.type_marchandise || "").toLowerCase().includes(search.toLowerCase()))
     .sort((a, b) => b.sequence_number - a.sequence_number);
 
   return (
@@ -663,12 +854,10 @@ function Dashboard({ dossiers, startSequence, onOpen, onNew, onEditStart }) {
           <div style={{ fontSize: 12, color: MUTED, marginTop: 4 }}>Répertoire à partir de OK26{startSequence}SS</div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
-          {dossiers.length === 0 && (
-            <button onClick={onEditStart} title="Modifier le point de départ" style={{
-              display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 11,
-              border: "1px solid rgba(255,255,255,0.12)", background: "transparent", color: MUTED, cursor: "pointer",
-            }}><IconSettings size={16} color={MUTED} /></button>
-          )}
+          <button onClick={onEditStart} title="Modifier le point de départ" style={{
+            display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 11,
+            border: "1px solid rgba(255,255,255,0.12)", background: "transparent", color: MUTED, cursor: "pointer",
+          }}><IconSettings size={16} color={MUTED} /></button>
           <button onClick={onNew} style={{
             display: "flex", alignItems: "center", gap: 8, padding: "11px 18px", borderRadius: 11,
             border: "none", background: GOLD, color: INK, fontSize: 14, fontWeight: 700, cursor: "pointer",
@@ -683,28 +872,39 @@ function Dashboard({ dossiers, startSequence, onOpen, onNew, onEditStart }) {
         <StatPill label="Reste à percevoir" value={fmtFCFA(resteTotal)} tone="muted" />
       </div>
 
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {["Tous", ...NIVEAUX].map((n) => (
+            <div key={n} onClick={() => setFilterNiveau(n)} style={selectChipStyle(filterNiveau === n)}>{n === "Tous" ? "Tous" : NIVEAU_LABEL[n]}</div>
+          ))}
+        </div>
+        <Toggle on={alertesActives} onChange={setAlertesActives} label="Alertes" />
+      </div>
+
       <div style={{ display: "flex", gap: 10, marginBottom: 18, flexWrap: "wrap", alignItems: "center" }}>
         <div style={{ position: "relative", flex: "1 1 220px" }}>
           <IconSearch size={15} color={MUTED} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)" }} />
-          <input placeholder="Rechercher un répertoire, une marchandise…" value={search} onChange={(e) => setSearch(e.target.value)} style={{ ...inputStyle, paddingLeft: 36 }} />
+          <input placeholder="Rechercher un répertoire, un client…" value={search} onChange={(e) => setSearch(e.target.value)} style={{ ...inputStyle, paddingLeft: 36 }} />
         </div>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           {["Tous", ...TYPES_OP].map((t) => <div key={t} onClick={() => setFilterOp(t)} style={selectChipStyle(filterOp === t)}>{t}</div>)}
         </div>
-        <div style={{ display: "flex", gap: 6 }}>
-          <div onClick={() => setFilterUrgency(filterUrgency === "red" ? "Tous" : "red")} style={{
-            ...selectChipStyle(filterUrgency === "red"),
-            borderColor: filterUrgency === "red" ? RED : "rgba(255,255,255,0.12)",
-            color: filterUrgency === "red" ? "#FF8A8D" : MUTED,
-            background: filterUrgency === "red" ? "rgba(229,72,77,0.14)" : "rgba(255,255,255,0.03)",
-          }}><IconAlertTriangle size={13} color={filterUrgency === "red" ? "#FF8A8D" : MUTED} style={{ marginRight: 5, display: "inline-block", verticalAlign: -2 }} />Rouge</div>
-          <div onClick={() => setFilterUrgency(filterUrgency === "yellow" ? "Tous" : "yellow")} style={{
-            ...selectChipStyle(filterUrgency === "yellow"),
-            borderColor: filterUrgency === "yellow" ? AMBER : "rgba(255,255,255,0.12)",
-            color: filterUrgency === "yellow" ? AMBER : MUTED,
-            background: filterUrgency === "yellow" ? "rgba(245,185,61,0.14)" : "rgba(255,255,255,0.03)",
-          }}><IconClock size={13} color={filterUrgency === "yellow" ? AMBER : MUTED} style={{ marginRight: 5, display: "inline-block", verticalAlign: -2 }} />Jaune</div>
-        </div>
+        {alertesActives && (
+          <div style={{ display: "flex", gap: 6 }}>
+            <div onClick={() => setFilterUrgency(filterUrgency === "red" ? "Tous" : "red")} style={{
+              ...selectChipStyle(filterUrgency === "red"),
+              borderColor: filterUrgency === "red" ? RED : "rgba(255,255,255,0.12)",
+              color: filterUrgency === "red" ? "#FF8A8D" : MUTED,
+              background: filterUrgency === "red" ? "rgba(229,72,77,0.14)" : "rgba(255,255,255,0.03)",
+            }}><IconAlertTriangle size={13} color={filterUrgency === "red" ? "#FF8A8D" : MUTED} style={{ marginRight: 5, display: "inline-block", verticalAlign: -2 }} />Rouge</div>
+            <div onClick={() => setFilterUrgency(filterUrgency === "yellow" ? "Tous" : "yellow")} style={{
+              ...selectChipStyle(filterUrgency === "yellow"),
+              borderColor: filterUrgency === "yellow" ? AMBER : "rgba(255,255,255,0.12)",
+              color: filterUrgency === "yellow" ? AMBER : MUTED,
+              background: filterUrgency === "yellow" ? "rgba(245,185,61,0.14)" : "rgba(255,255,255,0.03)",
+            }}><IconClock size={13} color={filterUrgency === "yellow" ? AMBER : MUTED} style={{ marginRight: 5, display: "inline-block", verticalAlign: -2 }} />Jaune</div>
+          </div>
+        )}
       </div>
 
       {filtered.length === 0 ? (
@@ -721,6 +921,69 @@ function Dashboard({ dossiers, startSequence, onOpen, onNew, onEditStart }) {
   );
 }
 
+/* ---------- Modal correction point de départ (accessible même après création de dossiers) ---------- */
+function EditStartSequenceModal({ currentStart, hasDossiers, onClose, onSaved }) {
+  const [value, setValue] = useState(String(currentStart || ""));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const n = parseInt(value, 10);
+  const valid = value.trim() !== "" && Number.isInteger(n) && n > 0;
+
+  const handleSave = async () => {
+    if (!valid) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await forceStartSequenceRemote(n);
+      onSaved(n);
+    } catch (e) {
+      setError("Impossible de mettre à jour : " + (e.message || "erreur inconnue"));
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={onClose}>
+      <div style={{ background: INK_2, border: "1px solid rgba(255,255,255,0.1)", borderRadius: 16, padding: 24, maxWidth: 420, width: "100%" }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: PAPER }}>Modifier le point de départ</div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", display: "flex" }}><IconX size={18} color={MUTED} /></button>
+        </div>
+
+        {hasDossiers && (
+          <div style={{ fontSize: 12.5, color: AMBER, background: "rgba(245,185,61,0.1)", border: "1px solid rgba(245,185,61,0.3)", borderRadius: 10, padding: 12, marginBottom: 16, lineHeight: 1.5 }}>
+            Des dossiers existent déjà. Changer cette valeur ne renumérote pas les dossiers existants — elle ne change que le point de départ pour les prochains numéros si aucun dossier ne dépasse déjà cette valeur.
+          </div>
+        )}
+
+        <Field label="Nouveau numéro de départ (ID)">
+          <input style={inputStyle} type="number" min="1" value={value} onChange={(e) => setValue(e.target.value)} />
+        </Field>
+
+        {valid && (
+          <div style={{ fontSize: 12.5, color: GOLD, marginBottom: 14, fontFamily: "ui-monospace, monospace" }}>
+            Prochain numéro potentiel : OK26{n}SS
+          </div>
+        )}
+
+        {error && <div style={{ fontSize: 12.5, color: "#FF8A8D", marginBottom: 10 }}>{error}</div>}
+
+        <div style={{ display: "flex", gap: 10 }}>
+          <button onClick={onClose} style={{ flex: 1, padding: "12px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.12)", background: "transparent", color: MUTED, fontWeight: 600, cursor: "pointer" }}>Annuler</button>
+          <button onClick={handleSave} disabled={!valid || saving} style={{
+            flex: 1, padding: "12px", borderRadius: 10, border: "none", background: GOLD, color: INK, fontWeight: 700,
+            cursor: valid && !saving ? "pointer" : "not-allowed", opacity: valid && !saving ? 1 : 0.5,
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+          }}>
+            {saving && <IconLoader size={14} color={INK} style={{ animation: "spin 1s linear infinite" }} />}
+            {saving ? "Enregistrement…" : "Enregistrer"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ---------- App racine ---------- */
 function App() {
   const [dossiers, setDossiers] = useState([]);
@@ -729,6 +992,7 @@ function App() {
   const [activeId, setActiveId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [connError, setConnError] = useState(null); // null = pas d'erreur, sinon message détaillé
+  const [showEditStart, setShowEditStart] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -821,13 +1085,22 @@ function App() {
         ) : (
           <React.Fragment>
             {view === "dashboard" && (
-              <Dashboard dossiers={dossiers} startSequence={startSequence} onOpen={openDossier} onNew={() => setView("new")} onEditStart={() => setStartSequence(null)} />
+              <Dashboard dossiers={dossiers} startSequence={startSequence} onOpen={openDossier} onNew={() => setView("new")} onEditStart={() => setShowEditStart(true)} />
             )}
             {view === "new" && <NewDossierForm onCancel={() => setView("dashboard")} onCreate={createDossier} />}
             {view === "detail" && activeDossier && <DossierDetail dossier={activeDossier} onBack={() => setView("dashboard")} onUpdate={updateDossier} />}
           </React.Fragment>
         )}
       </div>
+
+      {showEditStart && (
+        <EditStartSequenceModal
+          currentStart={startSequence}
+          hasDossiers={dossiers.length > 0}
+          onClose={() => setShowEditStart(false)}
+          onSaved={(n) => { setStartSequence(n); setShowEditStart(false); }}
+        />
+      )}
     </div>
   );
 }
