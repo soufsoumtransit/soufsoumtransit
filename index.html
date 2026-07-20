@@ -198,6 +198,12 @@ async function forceStartSequenceRemote(n) {
   if (error) throw error;
 }
 
+async function repertoireExists(repertoire) {
+  const { data, error } = await supabase.rpc("repertoire_exists", { p_repertoire: repertoire });
+  if (error) throw error;
+  return !!data;
+}
+
 async function fetchStartSequence() {
   const { data, error } = await supabase.from("app_config").select("value").eq("key", "start_sequence").maybeSingle();
   if (error) throw error;
@@ -420,6 +426,14 @@ function DossierCard({ d, onOpen }) {
 function NewDossierForm({ onCancel, onCreate }) {
   const [parcours, setParcours] = useState("AVD");
   const [nouveauStatut, setNouveauStatut] = useState("En attente de documents");
+  const [dateDossier, setDateDossier] = useState(new Date().toISOString().slice(0, 10));
+  const [modeRepertoire, setModeRepertoire] = useState("auto"); // "auto" | "manuel"
+  const [repertoireAuto, setRepertoireAuto] = useState(null);
+  const [seqAuto, setSeqAuto] = useState(null);
+  const [repertoireManuel, setRepertoireManuel] = useState("");
+  const [checkingRepertoire, setCheckingRepertoire] = useState(false);
+  const [repertoireDejaPris, setRepertoireDejaPris] = useState(false);
+  const [loadingNumero, setLoadingNumero] = useState(true);
   const [clientNom, setClientNom] = useState("");
   const [descriptionNote, setDescriptionNote] = useState("");
   const [numeroBl, setNumeroBl] = useState("");
@@ -435,8 +449,43 @@ function NewDossierForm({ onCancel, onCreate }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
+  // Pré-charge le prochain numéro automatique dès l'ouverture du formulaire,
+  // pour l'afficher par défaut et le rendre éditable.
+  useEffect(() => {
+    let cancelled = false;
+    getNextRepertoire().then(({ repertoire, sequence_number }) => {
+      if (cancelled) return;
+      setRepertoireAuto(repertoire);
+      setSeqAuto(sequence_number);
+      setLoadingNumero(false);
+    }).catch(() => { if (!cancelled) setLoadingNumero(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Vérifie en temps réel si le répertoire tapé manuellement existe déjà,
+  // avec un léger debounce pour ne pas spammer Supabase à chaque frappe.
+  useEffect(() => {
+    if (modeRepertoire !== "manuel" || !repertoireManuel.trim()) {
+      setRepertoireDejaPris(false);
+      return;
+    }
+    let cancelled = false;
+    setCheckingRepertoire(true);
+    const t = setTimeout(() => {
+      repertoireExists(repertoireManuel.trim()).then((exists) => {
+        if (cancelled) return;
+        setRepertoireDejaPris(exists);
+        setCheckingRepertoire(false);
+      }).catch(() => { if (!cancelled) setCheckingRepertoire(false); });
+    }, 400);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [repertoireManuel, modeRepertoire]);
+
   const reste = Math.max(0, (parseFloat(montantTotal) || 0) - (parseFloat(montantPaye) || 0));
   const clientValid = clientNom.trim() !== "";
+  const repertoireFinal = modeRepertoire === "auto" ? repertoireAuto : repertoireManuel.trim();
+  const repertoireValid = modeRepertoire === "auto" ? !!repertoireAuto : (repertoireManuel.trim() !== "" && !repertoireDejaPris && !checkingRepertoire);
+  const canSubmit = clientValid && repertoireValid && !loadingNumero;
 
   const niveauDepart = () => {
     if (parcours === "AVD") return "AVD";
@@ -446,13 +495,30 @@ function NewDossierForm({ onCancel, onCreate }) {
 
   const handleSubmit = async () => {
     if (!clientValid) { setError("Le nom du client est obligatoire."); return; }
+    if (!repertoireValid) { setError("Le répertoire n'est pas valide ou existe déjà."); return; }
     setSaving(true);
     setError(null);
     try {
-      const { repertoire, sequence_number } = await getNextRepertoire();
-      const now = new Date().toISOString();
+      // Le numéro automatique n'est confirmé qu'ici (jamais "réservé" en amont) :
+      // s'il a été affiché il y a longtemps, on retire un numéro frais pour éviter tout doublon.
+      let repertoire = repertoireFinal;
+      let sequence_number = seqAuto;
+      if (modeRepertoire === "auto") {
+        const fresh = await getNextRepertoire();
+        repertoire = fresh.repertoire;
+        sequence_number = fresh.sequence_number;
+      } else {
+        const exists = await repertoireExists(repertoire);
+        if (exists) { setError("Ce répertoire existe déjà. Choisissez-en un autre."); setSaving(false); return; }
+        // Répertoire manuel : sequence_number arbitraire élevé pour ne jamais interférer
+        // avec l'auto-incrémentation (qui reste basée sur la table + point de départ).
+        const match = repertoire.match(/^OK26(\d+)SS$/);
+        sequence_number = match ? parseInt(match[1], 10) : 0;
+      }
+
       const payload = {
         repertoire, sequence_number,
+        date_dossier: dateDossier,
         parcours,
         niveau_actuel: niveauDepart(),
         nouveau_dossier_statut: nouveauStatut,
@@ -461,16 +527,16 @@ function NewDossierForm({ onCancel, onCreate }) {
         numero_bl: numeroBl || null,
         type_op: typeOp,
         type_marchandise: typeMarchandise || null,
-        marchandise: typeMarchandise || null, // compat champ historique
+        marchandise: typeMarchandise || null,
         nb_conteneurs_20: parseInt(nb20, 10) || 0,
         nb_conteneurs_40: parseInt(nb40, 10) || 0,
         statut_avd: parcours === "AVD" ? "Soumis" : null,
-        statut_avd_changed_at: parcours === "AVD" ? now : null,
+        statut_avd_changed_at: parcours === "AVD" ? new Date().toISOString() : null,
         statuts_licences: [],
         exo_licence160: parcours === "Exoneration" ? "Soumis" : null,
         exo_attestation: parcours === "Exoneration" ? "Soumis" : null,
         declaration_statut2: parcours === "Declaration_directe" ? "Tirée" : null,
-        declaration_tiree_at: parcours === "Declaration_directe" ? now : null,
+        declaration_tiree_at: parcours === "Declaration_directe" ? new Date().toISOString() : null,
         paiement_simple: paiementSimple,
         paye: paiementSimple ? paye : false,
         montant_total: parseFloat(montantTotal) || 0,
@@ -499,6 +565,50 @@ function NewDossierForm({ onCancel, onCreate }) {
       </div>
 
       <div style={{ background: INK_2, border: "1px solid rgba(255,255,255,0.08)", borderRadius: 16, padding: 24 }}>
+        <Field label="Répertoire">
+          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            <div style={selectChipStyle(modeRepertoire === "auto")} onClick={() => setModeRepertoire("auto")}>Automatique</div>
+            <div style={selectChipStyle(modeRepertoire === "manuel")} onClick={() => setModeRepertoire("manuel")}>Taper un répertoire existant</div>
+          </div>
+          {modeRepertoire === "auto" ? (
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 14px", background: "rgba(196,149,42,0.08)", border: "1px solid rgba(196,149,42,0.25)", borderRadius: 10 }}>
+              <span style={{ fontSize: 13, color: GOLD, fontWeight: 600 }}>Prochain numéro</span>
+              <span style={{ fontSize: 15, fontWeight: 700, color: GOLD, fontFamily: "ui-monospace, monospace" }}>
+                {loadingNumero ? <IconLoader size={14} color={GOLD} style={{ animation: "spin 1s linear infinite" }} /> : repertoireAuto}
+              </span>
+            </div>
+          ) : (
+            <div>
+              <input
+                style={{ ...inputStyle, borderColor: repertoireManuel.trim() && repertoireDejaPris ? RED : "rgba(255,255,255,0.12)" }}
+                placeholder="Ex : OK26150SS"
+                value={repertoireManuel}
+                onChange={(e) => setRepertoireManuel(e.target.value.toUpperCase())}
+              />
+              {checkingRepertoire && (
+                <div style={{ fontSize: 12, color: MUTED, marginTop: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                  <IconLoader size={12} color={MUTED} style={{ animation: "spin 1s linear infinite" }} /> Vérification…
+                </div>
+              )}
+              {!checkingRepertoire && repertoireManuel.trim() && repertoireDejaPris && (
+                <div style={{ fontSize: 12, color: "#FF8A8D", marginTop: 6 }}>Ce répertoire existe déjà. Impossible de continuer avec ce numéro.</div>
+              )}
+              {!checkingRepertoire && repertoireManuel.trim() && !repertoireDejaPris && (
+                <div style={{ fontSize: 12, color: GREEN, marginTop: 6 }}>Répertoire disponible.</div>
+              )}
+              <div style={{ fontSize: 11.5, color: MUTED, marginTop: 8 }}>
+                Le prochain numéro automatique restera <span style={{ color: GOLD, fontFamily: "ui-monospace, monospace" }}>{repertoireAuto}</span> quel que soit le répertoire tapé ici.
+              </div>
+            </div>
+          )}
+        </Field>
+
+        <Field label="Date du dossier">
+          <input style={inputStyle} type="date" value={dateDossier} onChange={(e) => setDateDossier(e.target.value)} />
+        </Field>
+
+        <div style={{ height: 1, background: "rgba(196,149,42,0.3)", margin: "20px 0" }} />
+
         <Field label="Parcours du dossier">
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             {PARCOURS.map((p) => <div key={p.key} style={selectChipStyle(parcours === p.key)} onClick={() => setParcours(p.key)}>{p.label}</div>)}
@@ -597,10 +707,10 @@ function NewDossierForm({ onCancel, onCreate }) {
 
         {error && <div style={{ fontSize: 12.5, color: "#FF8A8D", marginTop: 10 }}>{error}</div>}
 
-        <button onClick={handleSubmit} disabled={saving} style={{
+        <button onClick={handleSubmit} disabled={saving || !canSubmit} style={{
           width: "100%", marginTop: 22, padding: "13px", borderRadius: 11, border: "none", background: GOLD, color: INK,
-          fontSize: 14.5, fontWeight: 700, cursor: saving ? "not-allowed" : "pointer", display: "flex",
-          alignItems: "center", justifyContent: "center", gap: 8, opacity: saving ? 0.7 : 1,
+          fontSize: 14.5, fontWeight: 700, cursor: (saving || !canSubmit) ? "not-allowed" : "pointer", display: "flex",
+          alignItems: "center", justifyContent: "center", gap: 8, opacity: (saving || !canSubmit) ? 0.5 : 1,
         }}>
           {saving ? <IconLoader size={16} color={INK} style={{ animation: "spin 1s linear infinite" }} /> : <IconFileCheck size={16} color={INK} />}
           {saving ? "Création…" : "Créer le dossier"}
