@@ -103,7 +103,7 @@ const PARCOURS = [
   { key: "Declaration_directe", label: "Déclaration directe" },
 ];
 const NIVEAUX = ["Nouveau", "AVD", "Exoneration", "Declaration", "Suivi_final"];
-const NIVEAU_LABEL = { Nouveau: "Nouveau dossier", AVD: "AVD", Exoneration: "Exonération", Declaration: "Déclaration", Suivi_final: "Suivi final" };
+const NIVEAU_LABEL = { Nouveau: "Nouveau dossier", AVD: "AVD", Exoneration: "Exonération", Declaration: "Déclaration", Suivi_final: "En finalisation" };
 const NOUVEAU_DOSSIER_STATUTS = ["Complet", "En attente de documents"];
 const PAYE_CHEZ_DEFAUT = ["Boss", "Agent"];
 
@@ -167,6 +167,34 @@ function urgencyOf(d) {
   if (red) return "red";
   if (yellow) return "yellow";
   return null;
+}
+
+// Calcule la dernière étape / sous-étape réellement cochée (non vide) pour un dossier,
+// en parcourant le workflow dans l'ordre et en gardant la dernière valeur non nulle.
+// Ignore volontairement les étapes antérieures dès qu'une étape plus avancée est cochée.
+function niveauAffiche(d) {
+  let niveau = "Nouveau";
+  let sousEtape = d.nouveau_dossier_statut || null;
+
+  if (d.parcours === "AVD" && d.statut_avd) {
+    niveau = "AVD";
+    sousEtape = d.statut_avd;
+  }
+  if (d.parcours === "Exoneration" && (d.exo_licence160 || d.exo_attestation)) {
+    niveau = "Exoneration";
+    // priorité à l'attestation si les deux sont cochées (étape la plus avancée du sous-workflow)
+    sousEtape = d.exo_attestation || d.exo_licence160;
+  }
+  if (d.declaration_statut2) {
+    niveau = "Declaration";
+    sousEtape = d.declaration_statut2;
+  }
+  if (d.suivi_final_statut) {
+    niveau = "Suivi_final";
+    sousEtape = d.suivi_final_statut;
+  }
+
+  return { niveau, sousEtape };
 }
 
 function fmtFCFA(n) {
@@ -253,7 +281,7 @@ function StatusPicker({ options, value, onChange, danger }) {
         const active = value === o;
         const isDanger = o === danger;
         return (
-          <div key={o} onClick={() => onChange(o)} style={{
+          <div key={o} onClick={() => onChange(active ? null : o)} style={{
             padding: "7px 12px", borderRadius: 8, fontSize: 12.5, fontWeight: 600, cursor: "pointer",
             border: "1px solid " + (active ? (isDanger ? RED : GOLD) : "rgba(255,255,255,0.1)"),
             background: active ? (isDanger ? "rgba(229,72,77,0.15)" : "rgba(196,149,42,0.15)") : "rgba(255,255,255,0.02)",
@@ -363,6 +391,7 @@ function DossierCard({ d, onOpen }) {
   const borderColor = urgency === "red" ? "rgba(229,72,77,0.55)" : urgency === "yellow" ? "rgba(245,185,61,0.5)" : "rgba(255,255,255,0.08)";
   const equipLabel = [d.nb_conteneurs_20 ? d.nb_conteneurs_20 + "x20'" : null, d.nb_conteneurs_40 ? d.nb_conteneurs_40 + "x40'" : null].filter(Boolean).join(" · ");
   const paiementOk = d.paiement_simple === false ? reste <= 0 : d.paye;
+  const etat = niveauAffiche(d);
 
   return (
     <button onClick={() => onOpen(d)} style={{
@@ -396,7 +425,10 @@ function DossierCard({ d, onOpen }) {
       </div>
 
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: MUTED, margin: "14px 0 6px" }}>
-        <span>Niveau</span><span style={{ color: GOLD, fontWeight: 600 }}>{NIVEAU_LABEL[d.niveau_actuel] || "Nouveau dossier"}</span>
+        <span>Niveau</span>
+        <span style={{ color: GOLD, fontWeight: 600 }}>
+          {NIVEAU_LABEL[etat.niveau]}{etat.sousEtape ? " · " + etat.sousEtape : ""}
+        </span>
       </div>
 
       <div style={{ height: 1, background: "rgba(255,255,255,0.08)", margin: "10px 0 14px" }} />
@@ -740,9 +772,7 @@ function DossierDetail({ dossier, onBack, onUpdate }) {
   };
 
   const setAvd = (statut) => {
-    const patch = { statut_avd: statut, statut_avd_changed_at: new Date().toISOString() };
-    if (statut === "Validé") patch.niveau_actuel = "Declaration";
-    update(patch);
+    update({ statut_avd: statut, statut_avd_changed_at: statut ? new Date().toISOString() : null });
   };
 
   const toggleLicence = (type) => {
@@ -754,28 +784,27 @@ function DossierDetail({ dossier, onBack, onUpdate }) {
   };
 
   const setLicenceStatut = (type, statut) => {
-    const statuts_licences = (d.statuts_licences || []).map((l) => (l.type === type ? { ...l, statut } : l));
+    const statuts_licences = statut === null
+      ? (d.statuts_licences || []).filter((l) => l.type !== type)
+      : (d.statuts_licences || []).map((l) => (l.type === type ? { ...l, statut } : l));
     update({ statuts_licences, licences_changed_at: new Date().toISOString() });
   };
 
   const setExo = (field, statut) => {
-    const patch = { [field]: statut };
-    const other = field === "exo_licence160" ? d.exo_attestation : d.exo_licence160;
-    if (statut === "Approuvée" && other === "Approuvée") patch.niveau_actuel = "Declaration";
-    update(patch);
+    update({ [field]: statut });
   };
 
   const setDeclaration2 = (statut) => {
     const now = new Date().toISOString();
     const patch = { declaration_statut2: statut };
     if (statut === "Tirée" && !d.declaration_tiree_at) patch.declaration_tiree_at = now;
-    if (statut === "Clôturée") patch.niveau_actuel = "Suivi_final";
+    if (statut !== "Tirée") patch.declaration_tiree_at = statut ? d.declaration_tiree_at : null;
     update(patch);
   };
 
   const setSuiviFinal = (statut) => {
     const now = new Date().toISOString();
-    const patch = { suivi_final_statut: statut, suivi_final_changed_at: now };
+    const patch = { suivi_final_statut: statut, suivi_final_changed_at: statut ? now : null };
     if (statut === "USN émis") patch.usn_emis_at = now;
     if (statut === "USN payé") patch.usn_paye_at = now;
     update(patch);
@@ -783,6 +812,7 @@ function DossierDetail({ dossier, onBack, onUpdate }) {
 
   const reste = (d.montant_total || 0) - (d.montant_paye || 0);
   const equipLabel = [d.nb_conteneurs_20 ? d.nb_conteneurs_20 + "x20'" : null, d.nb_conteneurs_40 ? d.nb_conteneurs_40 + "x40'" : null].filter(Boolean).join(" · ");
+  const etat = niveauAffiche(d);
 
   return (
     <div style={{ maxWidth: 760, margin: "0 auto" }}>
@@ -794,6 +824,7 @@ function DossierDetail({ dossier, onBack, onUpdate }) {
           <div>
             <div style={{ fontSize: 20, fontWeight: 700, color: PAPER, fontFamily: "ui-monospace, monospace" }}>{d.repertoire}</div>
             <div style={{ fontSize: 12.5, color: MUTED }}>{d.type_op}{equipLabel ? " · " + equipLabel : ""}{d.numero_bl ? " · BL " + d.numero_bl : ""}</div>
+            <div style={{ fontSize: 12, color: GOLD, fontWeight: 600, marginTop: 3 }}>{NIVEAU_LABEL[etat.niveau]}{etat.sousEtape ? " · " + etat.sousEtape : ""}</div>
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -877,7 +908,7 @@ function DossierDetail({ dossier, onBack, onUpdate }) {
         )}
       </ModuleCard>
 
-      <ModuleCard Icon={IconCheck} title="Suivi final">
+      <ModuleCard Icon={IconCheck} title="En finalisation">
         <StatusPicker options={SUIVI_FINAL_STATUTS} value={d.suivi_final_statut} onChange={setSuiviFinal} danger="" />
         {d.usn_emis_at && d.suivi_final_statut !== "USN payé" && d.suivi_final_statut !== "Clôturé" && (
           <div style={{ marginTop: 10, fontSize: 12, color: AMBER }}>USN émis depuis {timeAgo(d.usn_emis_at)} · en attente de paiement</div>
@@ -950,7 +981,7 @@ function Dashboard({ dossiers, startSequence, onOpen, onNew, onEditStart }) {
 
   const filtered = withUrgency
     .filter((d) => filterOp === "Tous" || d.type_op === filterOp)
-    .filter((d) => filterNiveau === "Tous" || d.niveau_actuel === filterNiveau)
+    .filter((d) => filterNiveau === "Tous" || niveauAffiche(d).niveau === filterNiveau)
     .filter((d) => filterUrgency === "Tous" || d._urgency === filterUrgency)
     .filter((d) => !search || d.repertoire.toLowerCase().includes(search.toLowerCase()) || (d.client_nom || "").toLowerCase().includes(search.toLowerCase()) || (d.type_marchandise || "").toLowerCase().includes(search.toLowerCase()))
     .sort((a, b) => b.sequence_number - a.sequence_number);
