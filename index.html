@@ -95,15 +95,14 @@ const AVD_STATUTS = ["Soumis", "En suspens", "En requête", "Resoumis", "Validé
 const LICENCE_TYPES = ["137", "155", "151", "153", "129", "Autre"];
 const LICENCE_STATUTS = ["À payer", "Soumis", "En suspens", "Approuvée", "Expirée"];
 const EXO_STATUTS = ["Soumis", "En suspens", "Resoumis", "Approuvée"];
-const DECL_STATUTS2 = ["Tirée", "Suivi en cours", "Clôturée"];
-const SUIVI_FINAL_STATUTS = ["Déclaration liquidée", "USN émis", "USN payé", "Clôturé"];
+const DECL_STATUTS2 = ["Tirée", "Déclaration liquidée", "USN émis", "USN payé", "Dossier clôturé"];
 const PARCOURS = [
   { key: "AVD", label: "AVD" },
   { key: "Exoneration", label: "Exonération" },
   { key: "Declaration_directe", label: "Déclaration directe" },
 ];
-const NIVEAUX = ["Nouveau", "AVD", "Exoneration", "Declaration", "Suivi_final"];
-const NIVEAU_LABEL = { Nouveau: "Nouveau dossier", AVD: "AVD", Exoneration: "Exonération", Declaration: "Déclaration", Suivi_final: "En finalisation" };
+const NIVEAUX = ["Nouveau", "AVD", "Exoneration", "Declaration"];
+const NIVEAU_LABEL = { Nouveau: "Nouveau dossier", AVD: "AVD", Exoneration: "Exonération", Declaration: "Déclaration" };
 const NOUVEAU_DOSSIER_STATUTS = ["Complet", "En attente de documents"];
 const PAYE_CHEZ_DEFAUT = ["DG", "Agent"];
 
@@ -188,10 +187,6 @@ function niveauAffiche(d) {
   if (d.declaration_statut2) {
     niveau = "Declaration";
     sousEtape = d.declaration_statut2;
-  }
-  if (d.suivi_final_statut) {
-    niveau = "Suivi_final";
-    sousEtape = d.suivi_final_statut;
   }
 
   return { niveau, sousEtape };
@@ -479,8 +474,8 @@ function DossierCard({ d, onOpen }) {
 
 /* ---------- Formulaire nouveau dossier ---------- */
 function NewDossierForm({ onCancel, onCreate }) {
-  const [parcours, setParcours] = useState("AVD");
-  const [nouveauStatut, setNouveauStatut] = useState("En attente de documents");
+  const [parcours, setParcours] = useState(null);
+  const [nouveauStatut, setNouveauStatut] = useState(null);
   const [dateDossier, setDateDossier] = useState(new Date().toISOString().slice(0, 10));
   const [modeRepertoire, setModeRepertoire] = useState("auto"); // "auto" | "manuel"
   const [repertoireAuto, setRepertoireAuto] = useState(null);
@@ -492,20 +487,18 @@ function NewDossierForm({ onCancel, onCreate }) {
   const [clientNom, setClientNom] = useState("");
   const [descriptionNote, setDescriptionNote] = useState("");
   const [numeroBl, setNumeroBl] = useState("");
-  const [typeOp, setTypeOp] = useState("Import");
+  const [typeOp, setTypeOp] = useState(null);
   const [typeMarchandise, setTypeMarchandise] = useState("");
   const [nb20, setNb20] = useState("");
   const [nb40, setNb40] = useState("");
   const [paiementSimple, setPaiementSimple] = useState(true);
-  const [paye, setPaye] = useState(false);
+  const [paye, setPaye] = useState(null);
   const [montantTotal, setMontantTotal] = useState("");
   const [montantPaye, setMontantPaye] = useState("");
-  const [payeChez, setPayeChez] = useState("DG");
+  const [payeChez, setPayeChez] = useState(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
-  // Pré-charge le prochain numéro automatique dès l'ouverture du formulaire,
-  // pour l'afficher par défaut et le rendre éditable.
   useEffect(() => {
     let cancelled = false;
     getNextRepertoire().then(({ repertoire, sequence_number }) => {
@@ -517,8 +510,6 @@ function NewDossierForm({ onCancel, onCreate }) {
     return () => { cancelled = true; };
   }, []);
 
-  // Vérifie en temps réel si le répertoire tapé manuellement existe déjà,
-  // avec un léger debounce pour ne pas spammer Supabase à chaque frappe.
   useEffect(() => {
     if (modeRepertoire !== "manuel" || !repertoireManuel.trim()) {
       setRepertoireDejaPris(false);
@@ -542,20 +533,12 @@ function NewDossierForm({ onCancel, onCreate }) {
   const repertoireValid = modeRepertoire === "auto" ? !!repertoireAuto : (repertoireManuel.trim() !== "" && !repertoireDejaPris && !checkingRepertoire);
   const canSubmit = clientValid && repertoireValid && !loadingNumero;
 
-  const niveauDepart = () => {
-    if (parcours === "AVD") return "AVD";
-    if (parcours === "Exoneration") return "Exoneration";
-    return "Declaration";
-  };
-
   const handleSubmit = async () => {
     if (!clientValid) { setError("Le nom du client est obligatoire."); return; }
     if (!repertoireValid) { setError("Le répertoire n'est pas valide ou existe déjà."); return; }
     setSaving(true);
     setError(null);
     try {
-      // Le numéro automatique n'est confirmé qu'ici (jamais "réservé" en amont) :
-      // s'il a été affiché il y a longtemps, on retire un numéro frais pour éviter tout doublon.
       let repertoire = repertoireFinal;
       let sequence_number = seqAuto;
       if (modeRepertoire === "auto") {
@@ -565,9 +548,7 @@ function NewDossierForm({ onCancel, onCreate }) {
       } else {
         const exists = await repertoireExists(repertoire);
         if (exists) { setError("Ce répertoire existe déjà. Choisissez-en un autre."); setSaving(false); return; }
-        // Répertoire manuel : sequence_number arbitraire élevé pour ne jamais interférer
-        // avec l'auto-incrémentation (qui reste basée sur la table + point de départ).
-        const match = repertoire.match(/^OK26(\d+)SS$/);
+        const match = repertoire.match(/^\D*(\d+)\D*$/);
         sequence_number = match ? parseInt(match[1], 10) : 0;
       }
 
@@ -575,7 +556,6 @@ function NewDossierForm({ onCancel, onCreate }) {
         repertoire, sequence_number,
         date_dossier: dateDossier,
         parcours,
-        niveau_actuel: niveauDepart(),
         nouveau_dossier_statut: nouveauStatut,
         client_nom: clientNom.trim(),
         description_note: descriptionNote || null,
@@ -594,7 +574,7 @@ function NewDossierForm({ onCancel, onCreate }) {
         declaration_tiree_at: null,
         numero_declaration: null,
         paiement_simple: paiementSimple,
-        paye: paiementSimple ? paye : false,
+        paye: paiementSimple ? !!paye : false,
         montant_total: parseFloat(montantTotal) || 0,
         montant_paye: parseFloat(montantPaye) || 0,
         paye_chez: payeChez,
@@ -609,7 +589,7 @@ function NewDossierForm({ onCancel, onCreate }) {
   };
 
   return (
-    <div style={{ maxWidth: 640, margin: "0 auto" }}>
+    <div style={{ maxWidth: 640, margin: "0 auto", paddingBottom: 90 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 22 }}>
         <button onClick={onCancel} style={{ background: "none", border: "none", cursor: "pointer", padding: 6, borderRadius: 8, display: "flex" }}>
           <IconArrowLeft size={20} color={MUTED} />
@@ -665,15 +645,21 @@ function NewDossierForm({ onCancel, onCreate }) {
 
         <div style={{ height: 1, background: "rgba(196,149,42,0.3)", margin: "20px 0" }} />
 
-        <Field label="Parcours du dossier">
+        <div style={{ marginBottom: 16 }}>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            {PARCOURS.map((p) => <div key={p.key} style={selectChipStyle(parcours === p.key)} onClick={() => setParcours(p.key)}>{p.label}</div>)}
+            {TYPES_OP.map((t) => <div key={t} style={selectChipStyle(typeOp === t)} onClick={() => setTypeOp(typeOp === t ? null : t)}>{t}</div>)}
           </div>
-        </Field>
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {PARCOURS.map((p) => <div key={p.key} style={selectChipStyle(parcours === p.key)} onClick={() => setParcours(parcours === p.key ? null : p.key)}>{p.label}</div>)}
+          </div>
+        </div>
 
         <Field label="État du dossier">
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            {NOUVEAU_DOSSIER_STATUTS.map((s) => <div key={s} style={selectChipStyle(nouveauStatut === s)} onClick={() => setNouveauStatut(s)}>{s}</div>)}
+            {NOUVEAU_DOSSIER_STATUTS.map((s) => <div key={s} style={selectChipStyle(nouveauStatut === s)} onClick={() => setNouveauStatut(nouveauStatut === s ? null : s)}>{s}</div>)}
           </div>
         </Field>
 
@@ -689,12 +675,6 @@ function NewDossierForm({ onCancel, onCreate }) {
 
         <Field label="Numéro de BL">
           <input style={inputStyle} placeholder="Ex : MSCU1234567" value={numeroBl} onChange={(e) => setNumeroBl(e.target.value)} />
-        </Field>
-
-        <Field label="Type d'opération">
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            {TYPES_OP.map((t) => <div key={t} style={selectChipStyle(typeOp === t)} onClick={() => setTypeOp(t)}>{t}</div>)}
-          </div>
         </Field>
 
         <Field label="Type de marchandise">
@@ -723,18 +703,18 @@ function NewDossierForm({ onCancel, onCreate }) {
         {paiementSimple ? (
           <Field label="Paiement">
             <div style={{ display: "flex", gap: 8 }}>
-              <div onClick={() => setPaye(true)} style={{
+              <div onClick={() => setPaye(paye === true ? null : true)} style={{
                 flex: 1, textAlign: "center", padding: "12px", borderRadius: 10, cursor: "pointer", fontWeight: 700, fontSize: 13.5,
-                border: "1px solid " + (paye ? GREEN : "rgba(255,255,255,0.12)"),
-                background: paye ? "rgba(63,201,138,0.15)" : "rgba(255,255,255,0.03)",
-                color: paye ? GREEN : MUTED,
-              }}><IconCheck size={14} color={paye ? GREEN : MUTED} style={{ marginRight: 6, display: "inline-block", verticalAlign: -2 }} />Payé</div>
-              <div onClick={() => setPaye(false)} style={{
+                border: "1px solid " + (paye === true ? GREEN : "rgba(255,255,255,0.12)"),
+                background: paye === true ? "rgba(63,201,138,0.15)" : "rgba(255,255,255,0.03)",
+                color: paye === true ? GREEN : MUTED,
+              }}><IconCheck size={14} color={paye === true ? GREEN : MUTED} style={{ marginRight: 6, display: "inline-block", verticalAlign: -2 }} />Payé</div>
+              <div onClick={() => setPaye(paye === false ? null : false)} style={{
                 flex: 1, textAlign: "center", padding: "12px", borderRadius: 10, cursor: "pointer", fontWeight: 700, fontSize: 13.5,
-                border: "1px solid " + (!paye ? RED : "rgba(255,255,255,0.12)"),
-                background: !paye ? "rgba(229,72,77,0.15)" : "rgba(255,255,255,0.03)",
-                color: !paye ? "#FF8A8D" : MUTED,
-              }}><IconX size={14} color={!paye ? "#FF8A8D" : MUTED} style={{ marginRight: 6, display: "inline-block", verticalAlign: -2 }} />Non payé</div>
+                border: "1px solid " + (paye === false ? RED : "rgba(255,255,255,0.12)"),
+                background: paye === false ? "rgba(229,72,77,0.15)" : "rgba(255,255,255,0.03)",
+                color: paye === false ? "#FF8A8D" : MUTED,
+              }}><IconX size={14} color={paye === false ? "#FF8A8D" : MUTED} style={{ marginRight: 6, display: "inline-block", verticalAlign: -2 }} />Non payé</div>
             </div>
           </Field>
         ) : (
@@ -750,7 +730,7 @@ function NewDossierForm({ onCancel, onCreate }) {
 
         <Field label="Payé chez">
           <div style={{ display: "flex", gap: 8 }}>
-            {PAYE_CHEZ_DEFAUT.map((p) => <div key={p} style={selectChipStyle(payeChez === p)} onClick={() => setPayeChez(p)}>{p}</div>)}
+            {PAYE_CHEZ_DEFAUT.map((p) => <div key={p} style={selectChipStyle(payeChez === p)} onClick={() => setPayeChez(payeChez === p ? null : p)}>{p}</div>)}
           </div>
         </Field>
 
@@ -762,15 +742,19 @@ function NewDossierForm({ onCancel, onCreate }) {
         )}
 
         {error && <div style={{ fontSize: 12.5, color: "#FF8A8D", marginTop: 10 }}>{error}</div>}
+      </div>
 
-        <button onClick={handleSubmit} disabled={saving || !canSubmit} style={{
-          width: "100%", marginTop: 22, padding: "13px", borderRadius: 11, border: "none", background: GOLD, color: INK,
-          fontSize: 14.5, fontWeight: 700, cursor: (saving || !canSubmit) ? "not-allowed" : "pointer", display: "flex",
-          alignItems: "center", justifyContent: "center", gap: 8, opacity: (saving || !canSubmit) ? 0.5 : 1,
-        }}>
-          {saving ? <IconLoader size={16} color={INK} style={{ animation: "spin 1s linear infinite" }} /> : <IconFileCheck size={16} color={INK} />}
-          {saving ? "Création…" : "Créer le dossier"}
-        </button>
+      <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, padding: "14px 16px", background: INK, borderTop: "1px solid rgba(255,255,255,0.08)", zIndex: 20 }}>
+        <div style={{ maxWidth: 640, margin: "0 auto" }}>
+          <button onClick={handleSubmit} disabled={saving || !canSubmit} style={{
+            width: "100%", padding: "13px", borderRadius: 11, border: "none", background: GOLD, color: INK,
+            fontSize: 14.5, fontWeight: 700, cursor: (saving || !canSubmit) ? "not-allowed" : "pointer", display: "flex",
+            alignItems: "center", justifyContent: "center", gap: 8, opacity: (saving || !canSubmit) ? 0.5 : 1,
+          }}>
+            {saving ? <IconLoader size={16} color={INK} style={{ animation: "spin 1s linear infinite" }} /> : <IconFileCheck size={16} color={INK} />}
+            {saving ? "Création…" : "Créer le dossier"}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -778,67 +762,62 @@ function NewDossierForm({ onCancel, onCreate }) {
 
 /* ---------- Détail dossier ---------- */
 function DossierDetail({ dossier, onBack, onUpdate }) {
-  const [d, setD] = useState(dossier);
-  const [syncing, setSyncing] = useState(false);
+  const [draft, setDraft] = useState(dossier);
+  const [saving, setSaving] = useState(false);
   const [tab, setTab] = useState("client");
-  const urgency = urgencyOf(d);
+  const urgency = urgencyOf(draft);
 
-  useEffect(() => { setD(dossier); }, [dossier]);
+  useEffect(() => { setDraft(dossier); }, [dossier]);
 
-  const update = async (patch) => {
-    const previous = d;
-    setD({ ...d, ...patch });
-    setSyncing(true);
-    const { data, error } = await supabase.from("dossiers").update(patch).eq("id", d.id).select().single();
-    setSyncing(false);
-    if (error) { setD(previous); return; }
-    setD(data);
-    onUpdate(data);
-  };
+  const dirty = JSON.stringify(draft) !== JSON.stringify(dossier);
+
+  const set = (patch) => setDraft((prev) => ({ ...prev, ...patch }));
 
   const setAvd = (statut) => {
-    update({ statut_avd: statut, statut_avd_changed_at: statut ? new Date().toISOString() : null });
+    set({ statut_avd: statut, statut_avd_changed_at: statut ? new Date().toISOString() : null });
   };
 
   const toggleLicence = (type) => {
-    const exists = (d.statuts_licences || []).find((l) => l.type === type);
+    const exists = (draft.statuts_licences || []).find((l) => l.type === type);
     const statuts_licences = exists
-      ? d.statuts_licences.filter((l) => l.type !== type)
-      : [...(d.statuts_licences || []), { type, statut: "À payer" }];
-    update({ statuts_licences, licences_changed_at: new Date().toISOString() });
+      ? draft.statuts_licences.filter((l) => l.type !== type)
+      : [...(draft.statuts_licences || []), { type, statut: "À payer" }];
+    set({ statuts_licences });
   };
 
   const setLicenceStatut = (type, statut) => {
     const statuts_licences = statut === null
-      ? (d.statuts_licences || []).filter((l) => l.type !== type)
-      : (d.statuts_licences || []).map((l) => (l.type === type ? { ...l, statut } : l));
-    update({ statuts_licences, licences_changed_at: new Date().toISOString() });
+      ? (draft.statuts_licences || []).filter((l) => l.type !== type)
+      : (draft.statuts_licences || []).map((l) => (l.type === type ? { ...l, statut } : l));
+    set({ statuts_licences });
   };
 
-  const setExo = (field, statut) => {
-    update({ [field]: statut });
-  };
+  const setExo = (field, statut) => set({ [field]: statut });
 
   const setDeclaration2 = (statut) => {
     const now = new Date().toISOString();
     const patch = { declaration_statut2: statut };
-    if (statut === "Tirée" && !d.declaration_tiree_at) patch.declaration_tiree_at = now;
-    if (statut !== "Tirée") patch.declaration_tiree_at = statut ? d.declaration_tiree_at : null;
-    update(patch);
-  };
-
-  const setSuiviFinal = (statut) => {
-    const now = new Date().toISOString();
-    const patch = { suivi_final_statut: statut, suivi_final_changed_at: statut ? now : null };
+    patch.declaration_tiree_at = statut ? (draft.declaration_tiree_at || now) : null;
     if (statut === "USN émis") patch.usn_emis_at = now;
     if (statut === "USN payé") patch.usn_paye_at = now;
-    update(patch);
+    set(patch);
   };
 
-  const reste = (d.montant_total || 0) - (d.montant_paye || 0);
-  const equipLabel = [d.nb_conteneurs_20 ? d.nb_conteneurs_20 + "x20'" : null, d.nb_conteneurs_40 ? d.nb_conteneurs_40 + "x40'" : null].filter(Boolean).join(" · ");
-  const etat = niveauAffiche(d);
-  const paiementOk = d.paiement_simple === false ? reste <= 0 : d.paye;
+  const handleValider = async () => {
+    setSaving(true);
+    const { data, error } = await supabase.from("dossiers").update(draft).eq("id", draft.id).select().single();
+    setSaving(false);
+    if (error) return;
+    setDraft(data);
+    onUpdate(data);
+  };
+
+  const handleAnnuler = () => setDraft(dossier);
+
+  const reste = (draft.montant_total || 0) - (draft.montant_paye || 0);
+  const equipLabel = [draft.nb_conteneurs_20 ? draft.nb_conteneurs_20 + "x20'" : null, draft.nb_conteneurs_40 ? draft.nb_conteneurs_40 + "x40'" : null].filter(Boolean).join(" · ");
+  const etat = niveauAffiche(draft);
+  const paiementOk = draft.paiement_simple === false ? reste <= 0 : draft.paye;
 
   const TABS = [
     { key: "client", label: "Client" },
@@ -847,24 +826,19 @@ function DossierDetail({ dossier, onBack, onUpdate }) {
   ];
 
   return (
-    <div style={{ maxWidth: 760, margin: "0 auto" }}>
+    <div style={{ maxWidth: 760, margin: "0 auto", paddingBottom: dirty ? 90 : 20 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20, flexWrap: "wrap", gap: 10 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <button onClick={onBack} style={{ background: "none", border: "none", cursor: "pointer", padding: 6, borderRadius: 8, display: "flex" }}>
             <IconArrowLeft size={20} color={MUTED} />
           </button>
           <div>
-            <div style={{ fontSize: 20, fontWeight: 700, color: PAPER, fontFamily: "ui-monospace, monospace" }}>{d.repertoire}</div>
-            <div style={{ fontSize: 12.5, color: MUTED }}>{d.type_op}{equipLabel ? " · " + equipLabel : ""}{d.numero_bl ? " · BL " + d.numero_bl : ""}</div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: PAPER, fontFamily: "ui-monospace, monospace" }}>{draft.repertoire}</div>
+            <div style={{ fontSize: 12.5, color: MUTED }}>{draft.type_op}{equipLabel ? " · " + equipLabel : ""}{draft.numero_bl ? " · BL " + draft.numero_bl : ""}</div>
             <div style={{ fontSize: 12, color: GOLD, fontWeight: 600, marginTop: 3 }}>{NIVEAU_LABEL[etat.niveau]}{etat.sousEtape ? " · " + etat.sousEtape : ""}</div>
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          {syncing && (
-            <span style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, color: MUTED }}>
-              <IconLoader size={12} color={MUTED} style={{ animation: "spin 1s linear infinite" }} /> Synchronisation…
-            </span>
-          )}
           {urgency === "red" && <Badge tone="red"><IconAlertTriangle size={12} color="#FF8A8D" />Retard 48h+</Badge>}
           {urgency === "yellow" && <Badge tone="amber"><IconClock size={12} color={AMBER} />En requête</Badge>}
         </div>
@@ -886,40 +860,54 @@ function DossierDetail({ dossier, onBack, onUpdate }) {
       {tab === "client" && (
         <ModuleCard Icon={IconUser} title="Client">
           <Field label="Nom du client">
-            <input style={inputStyle} value={d.client_nom || ""} onChange={(e) => update({ client_nom: e.target.value })} />
+            <input style={inputStyle} value={draft.client_nom || ""} onChange={(e) => set({ client_nom: e.target.value })} />
           </Field>
           <Field label="Description / Note">
-            <input style={inputStyle} value={d.description_note || ""} onChange={(e) => update({ description_note: e.target.value })} />
+            <input style={inputStyle} value={draft.description_note || ""} onChange={(e) => set({ description_note: e.target.value })} />
           </Field>
           <Field label="Numéro de BL">
-            <input style={inputStyle} value={d.numero_bl || ""} onChange={(e) => update({ numero_bl: e.target.value })} />
+            <input style={inputStyle} value={draft.numero_bl || ""} onChange={(e) => set({ numero_bl: e.target.value })} />
           </Field>
           <Field label="Date du dossier">
-            <input style={inputStyle} type="date" value={d.date_dossier || ""} onChange={(e) => update({ date_dossier: e.target.value })} />
+            <input style={inputStyle} type="date" value={draft.date_dossier || ""} onChange={(e) => set({ date_dossier: e.target.value })} />
           </Field>
         </ModuleCard>
       )}
 
       {tab === "parcours" && (
         <React.Fragment>
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {TYPES_OP.map((t) => <div key={t} style={selectChipStyle(draft.type_op === t)} onClick={() => set({ type_op: draft.type_op === t ? null : t })}>{t}</div>)}
+            </div>
+          </div>
+
+          <div style={{ height: 1, background: "rgba(196,149,42,0.3)", margin: "16px 0" }} />
+
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {PARCOURS.map((p) => <div key={p.key} style={selectChipStyle(draft.parcours === p.key)} onClick={() => set({ parcours: draft.parcours === p.key ? null : p.key })}>{p.label}</div>)}
+            </div>
+          </div>
+
           <ModuleCard Icon={IconFileCheck} title="Nouveau dossier">
-            <StatusPicker options={NOUVEAU_DOSSIER_STATUTS} value={d.nouveau_dossier_statut} onChange={(s) => update({ nouveau_dossier_statut: s })} danger="En attente de documents" />
+            <StatusPicker options={NOUVEAU_DOSSIER_STATUTS} value={draft.nouveau_dossier_statut} onChange={(s) => set({ nouveau_dossier_statut: s })} danger="En attente de documents" />
           </ModuleCard>
 
-          {d.parcours === "AVD" && (
+          {draft.parcours === "AVD" && (
             <ModuleCard Icon={IconShieldCheck} title="AVD">
-              <StatusPicker options={AVD_STATUTS} value={d.statut_avd} onChange={setAvd} />
-              {d.statut_avd === "En requête" && (
-                <div style={{ marginTop: 10, fontSize: 12, color: AMBER }}>En requête depuis {timeAgo(d.statut_avd_changed_at)}</div>
+              <StatusPicker options={AVD_STATUTS} value={draft.statut_avd} onChange={setAvd} />
+              {draft.statut_avd === "En requête" && (
+                <div style={{ marginTop: 10, fontSize: 12, color: AMBER }}>En requête depuis {timeAgo(draft.statut_avd_changed_at)}</div>
               )}
             </ModuleCard>
           )}
 
-          {d.parcours === "AVD" && (
+          {draft.parcours === "AVD" && (
             <ModuleCard Icon={IconFileCheck} title="Licences">
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
                 {LICENCE_TYPES.map((t) => {
-                  const active = (d.statuts_licences || []).some((l) => l.type === t);
+                  const active = (draft.statuts_licences || []).some((l) => l.type === t);
                   return (
                     <div key={t} onClick={() => toggleLicence(t)} style={{
                       padding: "7px 13px", borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
@@ -930,47 +918,38 @@ function DossierDetail({ dossier, onBack, onUpdate }) {
                   );
                 })}
               </div>
-              {(d.statuts_licences || []).map((l) => (
+              {(draft.statuts_licences || []).map((l) => (
                 <div key={l.type} style={{ marginBottom: 12, paddingLeft: 12, borderLeft: "2px solid rgba(196,149,42,0.3)" }}>
                   <div style={{ fontSize: 12, color: GOLD, fontWeight: 700, marginBottom: 6 }}>Licence {l.type}</div>
                   <StatusPicker options={LICENCE_STATUTS} value={l.statut} onChange={(s) => setLicenceStatut(l.type, s)} danger="En suspens" />
                 </div>
               ))}
-              {(d.statuts_licences || []).length === 0 && <div style={{ fontSize: 12.5, color: MUTED }}>Aucune licence sélectionnée.</div>}
+              {(draft.statuts_licences || []).length === 0 && <div style={{ fontSize: 12.5, color: MUTED }}>Aucune licence sélectionnée.</div>}
             </ModuleCard>
           )}
 
-          {d.parcours === "Exoneration" && (
+          {draft.parcours === "Exoneration" && (
             <ModuleCard Icon={IconShieldCheck} title="Exonération">
               <div style={{ marginBottom: 14 }}>
                 <div style={{ fontSize: 12, color: MUTED, fontWeight: 600, marginBottom: 6 }}>Licence 160</div>
-                <StatusPicker options={EXO_STATUTS} value={d.exo_licence160} onChange={(s) => setExo("exo_licence160", s)} danger="En suspens" />
+                <StatusPicker options={EXO_STATUTS} value={draft.exo_licence160} onChange={(s) => setExo("exo_licence160", s)} danger="En suspens" />
               </div>
               <div>
                 <div style={{ fontSize: 12, color: MUTED, fontWeight: 600, marginBottom: 6 }}>Attestation d'exonération</div>
-                <StatusPicker options={EXO_STATUTS} value={d.exo_attestation} onChange={(s) => setExo("exo_attestation", s)} danger="En suspens" />
+                <StatusPicker options={EXO_STATUTS} value={draft.exo_attestation} onChange={(s) => setExo("exo_attestation", s)} danger="En suspens" />
               </div>
             </ModuleCard>
           )}
 
           <ModuleCard Icon={IconReceipt} title="Déclaration">
-            <StatusPicker options={DECL_STATUTS2} value={d.declaration_statut2} onChange={setDeclaration2} danger="Tirée" />
-            {d.declaration_tiree_at && (
-              <div style={{ marginTop: 10, fontSize: 12, color: MUTED }}>Tirée depuis {timeAgo(d.declaration_tiree_at)}</div>
+            <StatusPicker options={DECL_STATUTS2} value={draft.declaration_statut2} onChange={setDeclaration2} danger="" />
+            {draft.declaration_tiree_at && (
+              <div style={{ marginTop: 10, fontSize: 12, color: MUTED }}>Tirée depuis {timeAgo(draft.declaration_tiree_at)}</div>
             )}
-            {d.declaration_statut2 && (
+            {draft.declaration_statut2 && (
               <div style={{ marginTop: 14 }}>
-                <Field label="Numéro de déclaration (ex : C, S ou E suivi de la date)">
-                  <input style={inputStyle} placeholder="Ex : C20250714 ou S20250714" value={d.numero_declaration || ""} onChange={(e) => update({ numero_declaration: e.target.value })} />
-                </Field>
+                <input style={inputStyle} placeholder="Numéro déclaration + date" value={draft.numero_declaration || ""} onChange={(e) => set({ numero_declaration: e.target.value })} />
               </div>
-            )}
-          </ModuleCard>
-
-          <ModuleCard Icon={IconCheck} title="En finalisation">
-            <StatusPicker options={SUIVI_FINAL_STATUTS} value={d.suivi_final_statut} onChange={setSuiviFinal} danger="" />
-            {d.usn_emis_at && d.suivi_final_statut !== "USN payé" && d.suivi_final_statut !== "Clôturé" && (
-              <div style={{ marginTop: 10, fontSize: 12, color: AMBER }}>USN émis depuis {timeAgo(d.usn_emis_at)} · en attente de paiement</div>
             )}
           </ModuleCard>
         </React.Fragment>
@@ -979,34 +958,34 @@ function DossierDetail({ dossier, onBack, onUpdate }) {
       {tab === "paiement" && (
         <ModuleCard Icon={IconWallet} title="Paiement">
           <div style={{ marginBottom: 16 }}>
-            <Toggle on={d.paiement_simple === false} onChange={(v) => update({ paiement_simple: !v })} label="Mode détails (montants)" />
+            <Toggle on={draft.paiement_simple === false} onChange={(v) => set({ paiement_simple: !v })} label="Mode détails (montants)" />
           </div>
 
-          {d.paiement_simple !== false ? (
+          {draft.paiement_simple !== false ? (
             <Field label="Statut">
               <div style={{ display: "flex", gap: 8 }}>
-                <div onClick={() => update({ paye: true })} style={{
+                <div onClick={() => set({ paye: draft.paye === true ? null : true })} style={{
                   flex: 1, textAlign: "center", padding: "12px", borderRadius: 10, cursor: "pointer", fontWeight: 700, fontSize: 13.5,
-                  border: "1px solid " + (d.paye ? GREEN : "rgba(255,255,255,0.12)"),
-                  background: d.paye ? "rgba(63,201,138,0.15)" : "rgba(255,255,255,0.03)",
-                  color: d.paye ? GREEN : MUTED,
-                }}><IconCheck size={14} color={d.paye ? GREEN : MUTED} style={{ marginRight: 6, display: "inline-block", verticalAlign: -2 }} />Payé</div>
-                <div onClick={() => update({ paye: false })} style={{
+                  border: "1px solid " + (draft.paye === true ? GREEN : "rgba(255,255,255,0.12)"),
+                  background: draft.paye === true ? "rgba(63,201,138,0.15)" : "rgba(255,255,255,0.03)",
+                  color: draft.paye === true ? GREEN : MUTED,
+                }}><IconCheck size={14} color={draft.paye === true ? GREEN : MUTED} style={{ marginRight: 6, display: "inline-block", verticalAlign: -2 }} />Payé</div>
+                <div onClick={() => set({ paye: draft.paye === false ? null : false })} style={{
                   flex: 1, textAlign: "center", padding: "12px", borderRadius: 10, cursor: "pointer", fontWeight: 700, fontSize: 13.5,
-                  border: "1px solid " + (!d.paye ? RED : "rgba(255,255,255,0.12)"),
-                  background: !d.paye ? "rgba(229,72,77,0.15)" : "rgba(255,255,255,0.03)",
-                  color: !d.paye ? "#FF8A8D" : MUTED,
-                }}><IconX size={14} color={!d.paye ? "#FF8A8D" : MUTED} style={{ marginRight: 6, display: "inline-block", verticalAlign: -2 }} />Non payé</div>
+                  border: "1px solid " + (draft.paye === false ? RED : "rgba(255,255,255,0.12)"),
+                  background: draft.paye === false ? "rgba(229,72,77,0.15)" : "rgba(255,255,255,0.03)",
+                  color: draft.paye === false ? "#FF8A8D" : MUTED,
+                }}><IconX size={14} color={draft.paye === false ? "#FF8A8D" : MUTED} style={{ marginRight: 6, display: "inline-block", verticalAlign: -2 }} />Non payé</div>
               </div>
             </Field>
           ) : (
             <React.Fragment>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
                 <Field label="Montant attendu">
-                  <input style={inputStyle} type="number" value={d.montant_total} onChange={(e) => update({ montant_total: parseFloat(e.target.value) || 0 })} />
+                  <input style={inputStyle} type="number" value={draft.montant_total} onChange={(e) => set({ montant_total: parseFloat(e.target.value) || 0 })} />
                 </Field>
                 <Field label="Montant payé">
-                  <input style={inputStyle} type="number" value={d.montant_paye} onChange={(e) => update({ montant_paye: parseFloat(e.target.value) || 0 })} />
+                  <input style={inputStyle} type="number" value={draft.montant_paye} onChange={(e) => set({ montant_paye: parseFloat(e.target.value) || 0 })} />
                 </Field>
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 14px", background: reste > 0 ? "rgba(229,72,77,0.08)" : "rgba(63,201,138,0.08)", border: "1px solid " + (reste > 0 ? "rgba(229,72,77,0.25)" : "rgba(63,201,138,0.25)"), borderRadius: 10, marginBottom: 16 }}>
@@ -1019,11 +998,27 @@ function DossierDetail({ dossier, onBack, onUpdate }) {
           <Field label="Payé chez">
             <div style={{ display: "flex", gap: 8 }}>
               {PAYE_CHEZ_DEFAUT.map((p) => (
-                <div key={p} style={selectChipStyle(d.paye_chez === p)} onClick={() => update({ paye_chez: p })}>{p}</div>
+                <div key={p} style={selectChipStyle(draft.paye_chez === p)} onClick={() => set({ paye_chez: draft.paye_chez === p ? null : p })}>{p}</div>
               ))}
             </div>
           </Field>
         </ModuleCard>
+      )}
+
+      {dirty && (
+        <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, padding: "14px 16px", background: INK, borderTop: "1px solid rgba(255,255,255,0.08)", zIndex: 20 }}>
+          <div style={{ maxWidth: 760, margin: "0 auto", display: "flex", gap: 10 }}>
+            <button onClick={handleAnnuler} style={{ padding: "13px 20px", borderRadius: 11, border: "1px solid rgba(255,255,255,0.12)", background: "transparent", color: MUTED, fontWeight: 600, cursor: "pointer" }}>Annuler</button>
+            <button onClick={handleValider} disabled={saving} style={{
+              flex: 1, padding: "13px", borderRadius: 11, border: "none", background: GOLD, color: INK,
+              fontSize: 14.5, fontWeight: 700, cursor: saving ? "not-allowed" : "pointer", display: "flex",
+              alignItems: "center", justifyContent: "center", gap: 8, opacity: saving ? 0.7 : 1,
+            }}>
+              {saving && <IconLoader size={16} color={INK} style={{ animation: "spin 1s linear infinite" }} />}
+              {saving ? "Enregistrement…" : "Valider les modifications"}
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -1033,6 +1028,7 @@ function DossierDetail({ dossier, onBack, onUpdate }) {
 function Dashboard({ dossiers, onOpen, onNew, onEditStart }) {
   const [filterOp, setFilterOp] = useState("Tous");
   const [filterNiveau, setFilterNiveau] = useState("Tous");
+  const [filterSousEtape, setFilterSousEtape] = useState("Tous");
   const [filterUrgency, setFilterUrgency] = useState("Tous");
   const [filterPaiement, setFilterPaiement] = useState("Tous"); // Tous | Paye | NonPaye
   const [alertesActives, setAlertesActives] = useState(true);
@@ -1042,13 +1038,20 @@ function Dashboard({ dossiers, onOpen, onNew, onEditStart }) {
   const withUrgency = dossiers.map((d) => ({ ...d, _urgency: alertesActives ? urgencyOf(d) : null }));
   const red = dossiers.filter((d) => urgencyOf(d) === "red").length;
   const yellow = dossiers.filter((d) => urgencyOf(d) === "yellow").length;
-  const resteTotal = dossiers.reduce((s, d) => s + Math.max(0, (d.montant_total || 0) - (d.montant_paye || 0)), 0);
 
   const estPaye = (d) => (d.paiement_simple === false ? (d.montant_total || 0) - (d.montant_paye || 0) <= 0 : !!d.paye);
+
+  // Sous-étapes disponibles pour le niveau sélectionné (pour affiner le filtre)
+  const sousEtapesDisponibles = filterNiveau === "AVD" ? AVD_STATUTS
+    : filterNiveau === "Exoneration" ? EXO_STATUTS
+    : filterNiveau === "Declaration" ? DECL_STATUTS2
+    : filterNiveau === "Nouveau" ? NOUVEAU_DOSSIER_STATUTS
+    : [];
 
   const filtered = withUrgency
     .filter((d) => filterOp === "Tous" || d.type_op === filterOp)
     .filter((d) => filterNiveau === "Tous" || niveauAffiche(d).niveau === filterNiveau)
+    .filter((d) => filterSousEtape === "Tous" || niveauAffiche(d).sousEtape === filterSousEtape)
     .filter((d) => filterUrgency === "Tous" || d._urgency === filterUrgency)
     .filter((d) => filterPaiement === "Tous" || (filterPaiement === "Paye" ? estPaye(d) : !estPaye(d)))
     .filter((d) => !search || d.repertoire.toLowerCase().includes(search.toLowerCase()) || (d.client_nom || "").toLowerCase().includes(search.toLowerCase()) || (d.type_marchandise || "").toLowerCase().includes(search.toLowerCase()))
@@ -1079,7 +1082,6 @@ function Dashboard({ dossiers, onOpen, onNew, onEditStart }) {
         <StatPill label="Dossiers actifs" value={dossiers.length} tone="gold" />
         <StatPill label="Alertes rouges" value={red} tone="red" />
         <StatPill label="En surveillance" value={yellow} tone="amber" />
-        <StatPill label="Reste à percevoir" value={fmtFCFA(resteTotal)} tone="muted" />
       </div>
 
       <div style={{ position: "relative", flex: "1 1 220px", marginBottom: 14 }}>
@@ -1087,11 +1089,19 @@ function Dashboard({ dossiers, onOpen, onNew, onEditStart }) {
         <input placeholder="Rechercher un répertoire, un client…" value={search} onChange={(e) => setSearch(e.target.value)} style={{ ...inputStyle, paddingLeft: 36 }} />
       </div>
 
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
         {["Tous", ...NIVEAUX].map((n) => (
-          <div key={n} onClick={() => setFilterNiveau(n)} style={selectChipStyle(filterNiveau === n)}>{n === "Tous" ? "Tous les niveaux" : NIVEAU_LABEL[n]}</div>
+          <div key={n} onClick={() => { setFilterNiveau(n); setFilterSousEtape("Tous"); }} style={selectChipStyle(filterNiveau === n)}>{n === "Tous" ? "Tous les niveaux" : NIVEAU_LABEL[n]}</div>
         ))}
       </div>
+
+      {sousEtapesDisponibles.length > 0 && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14, paddingLeft: 8, borderLeft: "2px solid rgba(196,149,42,0.3)" }}>
+          {["Tous", ...sousEtapesDisponibles].map((s) => (
+            <div key={s} onClick={() => setFilterSousEtape(s)} style={{ ...selectChipStyle(filterSousEtape === s), fontSize: 12 }}>{s}</div>
+          ))}
+        </div>
+      )}
 
       <div style={{ marginBottom: 18 }}>
         <button onClick={() => setShowFiltres(!showFiltres)} style={{
