@@ -803,16 +803,29 @@ function DossierDetail({ dossier, onBack, onUpdate }) {
     set(patch);
   };
 
+  const [saveError, setSaveError] = useState(null);
+
   const handleValider = async () => {
     setSaving(true);
-    const { data, error } = await supabase.from("dossiers").update(draft).eq("id", draft.id).select().single();
+    setSaveError(null);
+    // On n'envoie que les champs réellement modifiés, et jamais les champs système
+    // (id, created_at, updated_at, reste_a_payer qui est une colonne générée en base).
+    const champsInterdits = ["id", "created_at", "updated_at", "reste_a_payer", "repertoire", "sequence_number"];
+    const patch = {};
+    Object.keys(draft).forEach((k) => {
+      if (champsInterdits.includes(k)) return;
+      if (JSON.stringify(draft[k]) !== JSON.stringify(dossier[k])) patch[k] = draft[k];
+    });
+    if (Object.keys(patch).length === 0) { setSaving(false); return; }
+
+    const { data, error } = await supabase.from("dossiers").update(patch).eq("id", draft.id).select().single();
     setSaving(false);
-    if (error) return;
+    if (error) { setSaveError("Échec de l'enregistrement : " + error.message); return; }
     setDraft(data);
     onUpdate(data);
   };
 
-  const handleAnnuler = () => setDraft(dossier);
+  const handleAnnuler = () => { setDraft(dossier); setSaveError(null); };
 
   const reste = (draft.montant_total || 0) - (draft.montant_paye || 0);
   const equipLabel = [draft.nb_conteneurs_20 ? draft.nb_conteneurs_20 + "x20'" : null, draft.nb_conteneurs_40 ? draft.nb_conteneurs_40 + "x40'" : null].filter(Boolean).join(" · ");
@@ -1007,16 +1020,19 @@ function DossierDetail({ dossier, onBack, onUpdate }) {
 
       {dirty && (
         <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, padding: "14px 16px", background: INK, borderTop: "1px solid rgba(255,255,255,0.08)", zIndex: 20 }}>
-          <div style={{ maxWidth: 760, margin: "0 auto", display: "flex", gap: 10 }}>
-            <button onClick={handleAnnuler} style={{ padding: "13px 20px", borderRadius: 11, border: "1px solid rgba(255,255,255,0.12)", background: "transparent", color: MUTED, fontWeight: 600, cursor: "pointer" }}>Annuler</button>
-            <button onClick={handleValider} disabled={saving} style={{
-              flex: 1, padding: "13px", borderRadius: 11, border: "none", background: GOLD, color: INK,
-              fontSize: 14.5, fontWeight: 700, cursor: saving ? "not-allowed" : "pointer", display: "flex",
-              alignItems: "center", justifyContent: "center", gap: 8, opacity: saving ? 0.7 : 1,
-            }}>
-              {saving && <IconLoader size={16} color={INK} style={{ animation: "spin 1s linear infinite" }} />}
-              {saving ? "Enregistrement…" : "Valider les modifications"}
-            </button>
+          <div style={{ maxWidth: 760, margin: "0 auto" }}>
+            {saveError && <div style={{ fontSize: 12.5, color: "#FF8A8D", marginBottom: 8 }}>{saveError}</div>}
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={handleAnnuler} style={{ padding: "13px 20px", borderRadius: 11, border: "1px solid rgba(255,255,255,0.12)", background: "transparent", color: MUTED, fontWeight: 600, cursor: "pointer" }}>Annuler</button>
+              <button onClick={handleValider} disabled={saving} style={{
+                flex: 1, padding: "13px", borderRadius: 11, border: "none", background: GOLD, color: INK,
+                fontSize: 14.5, fontWeight: 700, cursor: saving ? "not-allowed" : "pointer", display: "flex",
+                alignItems: "center", justifyContent: "center", gap: 8, opacity: saving ? 0.7 : 1,
+              }}>
+                {saving && <IconLoader size={16} color={INK} style={{ animation: "spin 1s linear infinite" }} />}
+                {saving ? "Enregistrement…" : "Valider les modifications"}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1038,6 +1054,7 @@ function Dashboard({ dossiers, onOpen, onNew, onEditStart }) {
   const withUrgency = dossiers.map((d) => ({ ...d, _urgency: alertesActives ? urgencyOf(d) : null }));
   const red = dossiers.filter((d) => urgencyOf(d) === "red").length;
   const yellow = dossiers.filter((d) => urgencyOf(d) === "yellow").length;
+  const resteTotal = dossiers.reduce((s, d) => s + Math.max(0, (d.montant_total || 0) - (d.montant_paye || 0)), 0);
 
   const estPaye = (d) => (d.paiement_simple === false ? (d.montant_total || 0) - (d.montant_paye || 0) <= 0 : !!d.paye);
 
@@ -1138,6 +1155,10 @@ function Dashboard({ dossiers, onOpen, onNew, onEditStart }) {
                   color: filterPaiement === "NonPaye" ? "#FF8A8D" : MUTED,
                   background: filterPaiement === "NonPaye" ? "rgba(229,72,77,0.14)" : "rgba(255,255,255,0.03)",
                 }}><IconX size={12} color={filterPaiement === "NonPaye" ? "#FF8A8D" : MUTED} style={{ marginRight: 5, display: "inline-block", verticalAlign: -1 }} />Non payé</div>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 10, padding: "9px 12px", background: "rgba(196,149,42,0.06)", border: "1px solid rgba(196,149,42,0.2)", borderRadius: 8 }}>
+                <span style={{ fontSize: 12, color: MUTED }}>Reste à percevoir (tous dossiers)</span>
+                <span style={{ fontSize: 13, fontWeight: 700, color: GOLD }}>{fmtFCFA(resteTotal)}</span>
               </div>
             </div>
 
