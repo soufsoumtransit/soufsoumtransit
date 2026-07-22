@@ -93,7 +93,7 @@ const TYPES_OP = ["Import", "Export", "Transit"];
 const EQUIPEMENTS = ["20'", "40'", "Roulant", "Autre"];
 const AVD_STATUTS = ["Soumis", "En suspens", "En requête", "Resoumis", "Validé"];
 const LICENCE_TYPES = ["137", "155", "151", "153", "129", "Autre"];
-const LICENCE_STATUTS = ["À payer", "Soumis", "En suspens", "Approuvée", "Expirée"];
+const LICENCE_STATUTS = ["À payer", "Soumis", "En suspens", "Partiellement approuvée", "Approuvée", "Expirée"];
 const EXO_STATUTS = ["Soumis", "En suspens", "Resoumis", "Approuvée"];
 const DECL_STATUTS2 = ["Tirée", "Déclaration liquidée", "USN émis", "USN payé", "Dossier clôturé"];
 const PARCOURS = [
@@ -792,6 +792,11 @@ function DossierDetail({ dossier, onBack, onUpdate }) {
     set({ statuts_licences });
   };
 
+  const setLicenceReclamation = (type, texte) => {
+    const statuts_licences = (draft.statuts_licences || []).map((l) => (l.type === type ? { ...l, reclamation: texte } : l));
+    set({ statuts_licences });
+  };
+
   const setExo = (field, statut) => set({ [field]: statut });
 
   const setDeclaration2 = (statut) => {
@@ -913,6 +918,37 @@ function DossierDetail({ dossier, onBack, onUpdate }) {
               {draft.statut_avd === "En requête" && (
                 <div style={{ marginTop: 10, fontSize: 12, color: AMBER }}>En requête depuis {timeAgo(draft.statut_avd_changed_at)}</div>
               )}
+
+              {/* Champs DVT / DA : visibles et modifiables dès que le statut "Soumis" (ou tout statut suivant) est atteint */}
+              {draft.statut_avd && (
+                <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                    <Field label="Numéro DVT">
+                      <input style={inputStyle} placeholder="Ex : DVT-2026-001" value={draft.numero_dvt || ""} onChange={(e) => set({ numero_dvt: e.target.value })} />
+                    </Field>
+                    <Field label="Date DVT">
+                      <input style={inputStyle} type="date" value={draft.date_dvt || ""} onChange={(e) => set({ date_dvt: e.target.value })} />
+                    </Field>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                    <Field label="Numéro DA">
+                      <input style={inputStyle} placeholder="Ex : DA-2026-001" value={draft.numero_da || ""} onChange={(e) => set({ numero_da: e.target.value })} />
+                    </Field>
+                    <Field label="Date DA">
+                      <input style={inputStyle} type="date" value={draft.date_da || ""} onChange={(e) => set({ date_da: e.target.value })} />
+                    </Field>
+                  </div>
+                </div>
+              )}
+
+              {/* Numéro AVD : visible et modifiable une fois le statut "Validé" atteint */}
+              {draft.statut_avd === "Validé" && (
+                <div style={{ marginTop: 14 }}>
+                  <Field label="Numéro AVD">
+                    <input style={inputStyle} placeholder="Ex : AVD-2026-001" value={draft.numero_avd || ""} onChange={(e) => set({ numero_avd: e.target.value })} />
+                  </Field>
+                </div>
+              )}
             </ModuleCard>
           )}
 
@@ -935,6 +971,17 @@ function DossierDetail({ dossier, onBack, onUpdate }) {
                 <div key={l.type} style={{ marginBottom: 12, paddingLeft: 12, borderLeft: "2px solid rgba(196,149,42,0.3)" }}>
                   <div style={{ fontSize: 12, color: GOLD, fontWeight: 700, marginBottom: 6 }}>Licence {l.type}</div>
                   <StatusPicker options={LICENCE_STATUTS} value={l.statut} onChange={(s) => setLicenceStatut(l.type, s)} danger="En suspens" />
+                  {l.statut === "En suspens" && (
+                    <div style={{ marginTop: 10 }}>
+                      <label style={{ display: "block", fontSize: 11, color: MUTED, marginBottom: 6, textTransform: "uppercase" }}>Détails des réclamations</label>
+                      <textarea
+                        style={{ ...inputStyle, minHeight: 90, resize: "vertical", fontFamily: "inherit" }}
+                        placeholder="Coller ici l'intégralité du texte des éléments réclamés"
+                        value={l.reclamation || ""}
+                        onChange={(e) => setLicenceReclamation(l.type, e.target.value)}
+                      />
+                    </div>
+                  )}
                 </div>
               ))}
               {(draft.statuts_licences || []).length === 0 && <div style={{ fontSize: 12.5, color: MUTED }}>Aucune licence sélectionnée.</div>}
@@ -1278,6 +1325,141 @@ function EditStartSequenceModal({ currentStart, currentPrefixe, currentSuffixe, 
   );
 }
 
+/* ---------- Suivi des Licences (reporting WhatsApp) ---------- */
+function SuiviLicences({ dossiers, onUpdate, onBack }) {
+  const [societe, setSociete] = useState(null);
+  const [cacherEnvoyes, setCacherEnvoyes] = useState(true);
+
+  // Un "dossier" ici sert de proxy DVT/Répertoire : on regroupe par client_nom (Société) puis par repertoire (Répertoire).
+  const societes = Array.from(new Set(dossiers.map((d) => d.client_nom).filter(Boolean))).sort();
+
+  const dossiersConLicences = dossiers.filter((d) => (d.statuts_licences || []).length > 0);
+
+  const dossiersSociete = societe
+    ? dossiersConLicences.filter((d) => d.client_nom === societe)
+    : [];
+
+  const toutesApprouvees = (d) => (d.statuts_licences || []).length > 0 && (d.statuts_licences || []).every((l) => l.statut === "Approuvée");
+
+  const dossiersVisibles = dossiersSociete.filter((d) => {
+    if (!cacherEnvoyes) return true;
+    return !(toutesApprouvees(d) && d.licences_envoye);
+  });
+
+  const setLicenceStatutRapide = async (dossier, type, statut) => {
+    const statuts_licences = (dossier.statuts_licences || []).map((l) => (l.type === type ? { ...l, statut } : l));
+    const { data, error } = await supabase.from("dossiers").update({ statuts_licences }).eq("id", dossier.id).select().single();
+    if (!error && data) onUpdate(data);
+  };
+
+  const setReclamationRapide = async (dossier, type, texte) => {
+    const statuts_licences = (dossier.statuts_licences || []).map((l) => (l.type === type ? { ...l, reclamation: texte } : l));
+    const { data, error } = await supabase.from("dossiers").update({ statuts_licences }).eq("id", dossier.id).select().single();
+    if (!error && data) onUpdate(data);
+  };
+
+  const toggleEnvoye = async (dossier) => {
+    const { data, error } = await supabase.from("dossiers").update({ licences_envoye: !dossier.licences_envoye }).eq("id", dossier.id).select().single();
+    if (!error && data) onUpdate(data);
+  };
+
+  const genererMessageWhatsApp = () => {
+    const lignes = [];
+    dossiersVisibles.forEach((d) => {
+      const titreRepertoire = d.repertoire + (d.description_note ? " - " + d.description_note : "");
+      lignes.push("DVT " + titreRepertoire);
+      (d.statuts_licences || []).forEach((l) => {
+        let ligne = "Licence " + l.type + " : " + l.statut;
+        if (l.statut === "En suspens" && l.reclamation) {
+          ligne += " (En suspens : " + l.reclamation + ")";
+        }
+        lignes.push(ligne);
+      });
+      lignes.push("");
+    });
+    const message = lignes.join("\n").trim();
+    const url = "https://wa.me/?text=" + encodeURIComponent(message);
+    window.open(url, "_blank");
+  };
+
+  return (
+    <div style={{ maxWidth: 900, margin: "0 auto" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 22 }}>
+        <button onClick={onBack} style={{ background: "none", border: "none", cursor: "pointer", padding: 6, borderRadius: 8, display: "flex" }}>
+          <IconArrowLeft size={20} color={MUTED} />
+        </button>
+        <div>
+          <div style={{ fontSize: 11, color: GOLD, textTransform: "uppercase", letterSpacing: "0.06em" }}>Reporting externe</div>
+          <h1 style={{ fontSize: 22, fontWeight: 700, color: PAPER, margin: 0 }}>Suivi des licences</h1>
+        </div>
+      </div>
+
+      <Field label="Société">
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {societes.length === 0 && <div style={{ fontSize: 12.5, color: MUTED }}>Aucune société avec licences pour le moment.</div>}
+          {societes.map((s) => <div key={s} style={selectChipStyle(societe === s)} onClick={() => setSociete(societe === s ? null : s)}>{s}</div>)}
+        </div>
+      </Field>
+
+      {societe && (
+        <React.Fragment>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, marginTop: 10 }}>
+            <Toggle on={cacherEnvoyes} onChange={setCacherEnvoyes} label="Masquer les DVT déjà envoyées et 100% approuvées" />
+            <button onClick={genererMessageWhatsApp} disabled={dossiersVisibles.length === 0} style={{
+              display: "flex", alignItems: "center", gap: 8, padding: "10px 16px", borderRadius: 10, border: "none",
+              background: dossiersVisibles.length ? GREEN : "rgba(255,255,255,0.08)", color: dossiersVisibles.length ? INK : MUTED,
+              fontSize: 13.5, fontWeight: 700, cursor: dossiersVisibles.length ? "pointer" : "not-allowed",
+            }}>Générer Rapport WhatsApp</button>
+          </div>
+
+          {dossiersVisibles.length === 0 ? (
+            <div style={{ textAlign: "center", padding: "40px 20px", color: MUTED, fontSize: 13.5 }}>
+              Aucune DVT à afficher pour cette société avec ces filtres.
+            </div>
+          ) : (
+            dossiersVisibles.map((d) => (
+              <div key={d.id} style={{ background: INK_2, border: "1px solid rgba(255,255,255,0.08)", borderRadius: 14, padding: 18, marginBottom: 14 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12, flexWrap: "wrap", gap: 10 }}>
+                  <div style={{ fontSize: 14.5, fontWeight: 700, color: PAPER, fontFamily: "ui-monospace, monospace" }}>
+                    DVT {d.repertoire}{d.description_note ? " - " + d.description_note : ""}
+                  </div>
+                  <div onClick={() => toggleEnvoye(d)} style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                    <div style={{
+                      width: 18, height: 18, borderRadius: 5, border: "1px solid " + (d.licences_envoye ? GOLD : "rgba(255,255,255,0.25)"),
+                      background: d.licences_envoye ? GOLD : "transparent", display: "flex", alignItems: "center", justifyContent: "center",
+                    }}>
+                      {d.licences_envoye && <IconCheck size={12} color={INK} />}
+                    </div>
+                    <span style={{ fontSize: 12.5, color: d.licences_envoye ? GOLD : MUTED, fontWeight: 600 }}>Déjà envoyé</span>
+                  </div>
+                </div>
+
+                {(d.statuts_licences || []).map((l) => (
+                  <div key={l.type} style={{ marginBottom: 12, paddingLeft: 12, borderLeft: "2px solid rgba(196,149,42,0.3)" }}>
+                    <div style={{ fontSize: 12, color: GOLD, fontWeight: 700, marginBottom: 6 }}>Licence {l.type}</div>
+                    <StatusPicker options={LICENCE_STATUTS} value={l.statut} onChange={(s) => s && setLicenceStatutRapide(d, l.type, s)} danger="En suspens" />
+                    {l.statut === "En suspens" && (
+                      <div style={{ marginTop: 10 }}>
+                        <label style={{ display: "block", fontSize: 11, color: MUTED, marginBottom: 6, textTransform: "uppercase" }}>Détails des réclamations</label>
+                        <textarea
+                          style={{ ...inputStyle, minHeight: 70, resize: "vertical", fontFamily: "inherit" }}
+                          placeholder="Coller ici l'intégralité du texte des éléments réclamés"
+                          defaultValue={l.reclamation || ""}
+                          onBlur={(e) => setReclamationRapide(d, l.type, e.target.value)}
+                        />
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ))
+          )}
+        </React.Fragment>
+      )}
+    </div>
+  );
+}
+
 /* ---------- App racine ---------- */
 function App() {
   const [dossiers, setDossiers] = useState([]);
@@ -1369,9 +1551,20 @@ function App() {
             </div>
             <span style={{ fontSize: 15, fontWeight: 700, color: PAPER }}>SOUF-SOUM Transit</span>
           </div>
-          <div style={{ fontSize: 12, color: MUTED, display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ width: 7, height: 7, borderRadius: "50%", background: GREEN, display: "inline-block" }} />
-            Synchronisé
+          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+            <button onClick={() => setView(view === "suivi-licences" ? "dashboard" : "suivi-licences")} style={{
+              display: "flex", alignItems: "center", gap: 7, background: "none",
+              border: "1px solid " + (view === "suivi-licences" ? GOLD : "rgba(255,255,255,0.12)"),
+              borderRadius: 9, padding: "7px 12px", color: view === "suivi-licences" ? GOLD : MUTED,
+              fontSize: 12.5, fontWeight: 600, cursor: "pointer",
+            }}>
+              <IconFileCheck size={14} color={view === "suivi-licences" ? GOLD : MUTED} />
+              Suivi des licences
+            </button>
+            <div style={{ fontSize: 12, color: MUTED, display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ width: 7, height: 7, borderRadius: "50%", background: GREEN, display: "inline-block" }} />
+              Synchronisé
+            </div>
           </div>
         </div>
       </div>
@@ -1386,6 +1579,7 @@ function App() {
             )}
             {view === "new" && <NewDossierForm onCancel={() => setView("dashboard")} onCreate={createDossier} />}
             {view === "detail" && activeDossier && <DossierDetail dossier={activeDossier} onBack={() => setView("dashboard")} onUpdate={updateDossier} />}
+            {view === "suivi-licences" && <SuiviLicences dossiers={dossiers} onUpdate={updateDossier} onBack={() => setView("dashboard")} />}
           </React.Fragment>
         )}
       </div>
