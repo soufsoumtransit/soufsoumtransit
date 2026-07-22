@@ -1,0 +1,1418 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no" />
+<title>SOUF-SOUM Transit</title>
+
+<!-- CDN stables, versions épinglées -->
+<script src="https://cdn.tailwindcss.com/3.4.1"></script>
+<script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.24.0/babel.min.js"></script>
+<script src="https://unpkg.com/@supabase/supabase-js@2.39.7/dist/umd/supabase.js"></script>
+
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #060C18; min-height: 100vh; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+  input:focus { outline: none; border-color: #C4952A !important; }
+  @keyframes spin { from { transform: rotate(0deg);} to { transform: rotate(360deg);} }
+  .spin { animation: spin 1s linear infinite; }
+  #boot-error {
+    display: none; position: fixed; inset: 0; background: #060C18; color: #F4F1E8;
+    font-family: -apple-system, sans-serif; padding: 24px; z-index: 9999;
+    overflow-y: auto;
+  }
+</style>
+</head>
+<body>
+
+<!-- Écran d'erreur de secours : visible si React ne démarre jamais (erreur de script avant montage) -->
+<div id="boot-error">
+  <div style="max-width:480px;margin:60px auto 0;text-align:center;">
+    <div style="font-size:32px;margin-bottom:12px;">⚠️</div>
+    <div style="font-size:16px;font-weight:700;margin-bottom:10px;">L'application n'a pas pu démarrer</div>
+    <div id="boot-error-detail" style="font-size:13px;color:#8B93A7;line-height:1.6;text-align:left;background:#0B1526;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:14px;white-space:pre-wrap;word-break:break-word;"></div>
+  </div>
+</div>
+
+<div id="root"></div>
+
+<script>
+  // Filet de sécurité global : toute erreur JS non interceptée (CDN qui ne charge pas,
+  // script cassé, etc.) affiche un écran lisible au lieu d'un écran blanc silencieux.
+  window.addEventListener("error", function (e) {
+    var root = document.getElementById("root");
+    var boot = document.getElementById("boot-error");
+    var detail = document.getElementById("boot-error-detail");
+    if (root && root.childElementCount === 0) {
+      boot.style.display = "block";
+      detail.textContent = (e.message || "Erreur inconnue") + "\n" + (e.filename ? ("Fichier : " + e.filename + ":" + e.lineno) : "");
+    }
+  });
+</script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect } = React;
+
+/* =========================================================
+   Vérification de présence des bibliothèques CDN au démarrage
+   ========================================================= */
+(function checkLibs() {
+  const missing = [];
+  if (typeof React === "undefined") missing.push("React");
+  if (typeof ReactDOM === "undefined") missing.push("ReactDOM");
+  if (typeof window.supabase === "undefined") missing.push("Supabase JS");
+  if (missing.length > 0) {
+    const boot = document.getElementById("boot-error");
+    const detail = document.getElementById("boot-error-detail");
+    boot.style.display = "block";
+    detail.textContent = "Bibliothèque(s) non chargée(s) : " + missing.join(", ") + "\nVérifiez la connexion internet ou que les CDN ne sont pas bloqués sur ce réseau.";
+    throw new Error("Bibliothèques manquantes : " + missing.join(", "));
+  }
+})();
+
+/* ---------- Supabase ---------- */
+const SUPABASE_URL = "https://muhfzovmjqsymgidmkoe.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im11aGZ6b3ZtanFzeW1naWRta29lIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ0OTQwNTAsImV4cCI6MjEwMDA3MDA1MH0.RGEQ_nNbSIxKAxGF8bFNwOTtEc-SYFtY9P4xezx8Tlc";
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+/* ---------- Constantes visuelles ---------- */
+const INK = "#060C18";
+const INK_2 = "#0B1526";
+const GOLD = "#C4952A";
+const PAPER = "#F4F1E8";
+const MUTED = "#8B93A7";
+const RED = "#E5484D";
+const AMBER = "#F5B93D";
+const GREEN = "#3FC98A";
+
+/* ---------- Constantes métier ---------- */
+const TYPES_OP = ["Import", "Export", "Transit"];
+const EQUIPEMENTS = ["20'", "40'", "Roulant", "Autre"];
+const AVD_STATUTS = ["Soumis", "En suspens", "En requête", "Resoumis", "Validé"];
+const LICENCE_TYPES = ["137", "155", "151", "153", "129", "Autre"];
+const LICENCE_STATUTS = ["À payer", "Soumis", "En suspens", "Approuvée", "Expirée"];
+const EXO_STATUTS = ["Soumis", "En suspens", "Resoumis", "Approuvée"];
+const DECL_STATUTS2 = ["Tirée", "Déclaration liquidée", "USN émis", "USN payé", "Dossier clôturé"];
+const PARCOURS = [
+  { key: "AVD", label: "AVD" },
+  { key: "Exoneration", label: "Exonération" },
+  { key: "Declaration_directe", label: "Déclaration directe" },
+];
+const NIVEAUX = ["Nouveau", "AVD", "Exoneration", "Declaration"];
+const NIVEAU_LABEL = { Nouveau: "Nouveau dossier", AVD: "AVD", Exoneration: "Exonération", Declaration: "Déclaration" };
+const NOUVEAU_DOSSIER_STATUTS = ["Complet", "En attente de documents"];
+const PAYE_CHEZ_DEFAUT = ["DG", "Agent"];
+
+/* =========================================================
+   Icônes SVG inline — zéro dépendance externe, zéro risque
+   de rupture liée à une CDN d'icônes qui charge mal/tard.
+   ========================================================= */
+function svgIcon(paths, viewBox) {
+  viewBox = viewBox || "0 0 24 24";
+  return function IconComp({ size = 16, color = PAPER, style = {} }) {
+    return (
+      <svg width={size} height={size} viewBox={viewBox} fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, ...style }}>
+        {paths}
+      </svg>
+    );
+  };
+}
+
+const IconPackage = svgIcon(<><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></>);
+const IconPlus = svgIcon(<><path d="M5 12h14"/><path d="M12 5v14"/></>);
+const IconSearch = svgIcon(<><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></>);
+const IconAlertTriangle = svgIcon(<><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></>);
+const IconClock = svgIcon(<><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></>);
+const IconArrowLeft = svgIcon(<><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></>);
+const IconFileCheck = svgIcon(<><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="m9 15 2 2 4-4"/></>);
+const IconShieldCheck = svgIcon(<><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.79 17 5 19 5a1 1 0 0 1 1 1Z"/><path d="m9 12 2 2 4-4"/></>);
+const IconReceipt = svgIcon(<><path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z"/><path d="M16 8h-6"/><path d="M16 12h-6"/><path d="M12 16h-4"/></>);
+const IconLoader = svgIcon(<><path d="M21 12a9 9 0 1 1-6.219-8.56"/></>);
+const IconArrowDownRight = svgIcon(<><path d="M7 7l10 10"/><path d="M17 7v10H7"/></>);
+const IconArrowUpRight = svgIcon(<><path d="M7 17 17 7"/><path d="M7 7h10v10"/></>);
+const IconArrowRightLeft = svgIcon(<><path d="m16 3 4 4-4 4"/><path d="M20 7H4"/><path d="m8 21-4-4 4-4"/><path d="M4 17h16"/></>);
+const IconTruck = svgIcon(<><path d="M14 18V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v11a1 1 0 0 0 1 1h2"/><path d="M15 18H9"/><path d="M19 18h2a1 1 0 0 0 1-1v-3.65a1 1 0 0 0-.22-.62L18.3 8.38A1 1 0 0 0 17.52 8H14"/><circle cx="17" cy="18" r="2"/><circle cx="7" cy="18" r="2"/></>);
+const IconContainer = svgIcon(<><path d="M22 7.7c0-.6-.4-1.2-.8-1.5l-6.3-3.9a1.72 1.72 0 0 0-1.7 0l-10.3 6c-.5.3-.9.9-.9 1.5v6.6c0 .6.4 1.2.8 1.5l6.3 3.9a1.72 1.72 0 0 0 1.7 0l10.3-6c.5-.3.9-.9.9-1.5Z"/><path d="M10 21.9V14L2.1 9.1"/><path d="m10 14 11.9-6.9"/><path d="M14 19.8v-8.1"/><path d="M18 17.5V9.4"/></>);
+const IconSettings = svgIcon(<><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2Z"/><circle cx="12" cy="12" r="3"/></>);
+const IconWallet = svgIcon(<><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></>);
+const IconFilter = svgIcon(<><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></>);
+const IconUser = svgIcon(<><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></>);
+const IconCheck = svgIcon(<><path d="M20 6 9 17l-5-5"/></>);
+const IconX = svgIcon(<><path d="M18 6 6 18"/><path d="m6 6 12 12"/></>);
+const IconChevronRight = svgIcon(<><path d="m9 18 6-6-6-6"/></>);
+
+/* ---------- Utilitaires ---------- */
+function hoursSince(dateStr) {
+  if (!dateStr) return null;
+  return (Date.now() - new Date(dateStr).getTime()) / 36e5;
+}
+
+function urgencyOf(d) {
+  const avdReq = d.statut_avd === "En requête";
+  const licReq = (d.statuts_licences || []).some((l) => l.statut === "En requête");
+  const exoReq = d.exo_licence160 === "En suspens" || d.exo_attestation === "En suspens";
+  let red = false, yellow = false;
+  if (avdReq || licReq) {
+    yellow = true;
+    const h = hoursSince(d.statut_avd_changed_at);
+    if (h !== null && h > 48) red = true;
+  }
+  if (exoReq) {
+    yellow = true;
+  }
+  if (red) return "red";
+  if (yellow) return "yellow";
+  return null;
+}
+
+// Calcule la dernière étape / sous-étape réellement cochée (non vide) pour un dossier,
+// en parcourant le workflow dans l'ordre et en gardant la dernière valeur non nulle.
+// Ignore volontairement les étapes antérieures dès qu'une étape plus avancée est cochée.
+function niveauAffiche(d) {
+  let niveau = "Nouveau";
+  let sousEtape = d.nouveau_dossier_statut || null;
+
+  if (d.parcours === "AVD" && d.statut_avd) {
+    niveau = "AVD";
+    sousEtape = d.statut_avd;
+  }
+  if (d.parcours === "Exoneration" && (d.exo_licence160 || d.exo_attestation)) {
+    niveau = "Exoneration";
+    // priorité à l'attestation si les deux sont cochées (étape la plus avancée du sous-workflow)
+    sousEtape = d.exo_attestation || d.exo_licence160;
+  }
+  if (d.declaration_statut2) {
+    niveau = "Declaration";
+    sousEtape = d.declaration_statut2;
+  }
+
+  return { niveau, sousEtape };
+}
+
+function fmtFCFA(n) {
+  return new Intl.NumberFormat("fr-FR").format(Math.round(n || 0)) + " F";
+}
+
+function timeAgo(dateStr) {
+  const h = hoursSince(dateStr);
+  if (h === null) return "";
+  if (h < 1) return Math.round(h * 60) + " min";
+  if (h < 48) return Math.round(h) + " h";
+  return Math.round(h / 24) + " j";
+}
+
+async function getNextRepertoire() {
+  const { data, error } = await supabase.rpc("next_repertoire");
+  if (error) throw error;
+  const row = Array.isArray(data) ? data[0] : data;
+  return { repertoire: row.repertoire, sequence_number: row.seq };
+}
+
+async function setStartSequenceRemote(n, prefixe, suffixe, largeur) {
+  const { error } = await supabase.rpc("set_start_sequence_format", { p_start: n, p_prefixe: prefixe, p_suffixe: suffixe, p_largeur: largeur });
+  if (error) throw error;
+}
+
+async function forceStartSequenceRemote(n, prefixe, suffixe, largeur) {
+  const { error } = await supabase.rpc("force_start_sequence_format", { p_start: n, p_prefixe: prefixe, p_suffixe: suffixe, p_largeur: largeur });
+  if (error) throw error;
+}
+
+async function repertoireExists(repertoire) {
+  const { data, error } = await supabase.rpc("repertoire_exists", { p_repertoire: repertoire });
+  if (error) throw error;
+  return !!data;
+}
+
+async function fetchStartSequence() {
+  const { data, error } = await supabase.from("app_config").select("value").eq("key", "start_sequence").maybeSingle();
+  if (error) throw error;
+  return data ? data.value : null;
+}
+
+async function fetchRepertoireFormat() {
+  const { data, error } = await supabase.from("app_config").select("value").eq("key", "repertoire_format").maybeSingle();
+  if (error) throw error;
+  return data ? data.value : null;
+}
+
+/* ---------- Styles partagés ---------- */
+const inputStyle = {
+  width: "100%", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.12)",
+  borderRadius: 10, padding: "10px 12px", color: PAPER, fontSize: 14,
+};
+const selectChipStyle = (active) => ({
+  padding: "8px 14px", borderRadius: 9, fontSize: 13, fontWeight: 600, cursor: "pointer",
+  border: "1px solid " + (active ? GOLD : "rgba(255,255,255,0.12)"),
+  background: active ? "rgba(196,149,42,0.16)" : "rgba(255,255,255,0.03)",
+  color: active ? GOLD : MUTED,
+});
+
+/* ---------- Composants UI ---------- */
+function Badge({ children, tone }) {
+  const tones = {
+    red: { bg: "rgba(229,72,77,0.14)", fg: "#FF8A8D", bd: "rgba(229,72,77,0.4)" },
+    amber: { bg: "rgba(245,185,61,0.14)", fg: AMBER, bd: "rgba(245,185,61,0.4)" },
+  };
+  const t = tones[tone];
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11.5, fontWeight: 600, padding: "3px 9px", borderRadius: 999, background: t.bg, color: t.fg, border: "1px solid " + t.bd, whiteSpace: "nowrap" }}>
+      {children}
+    </span>
+  );
+}
+
+function Field({ label, children }) {
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: MUTED, marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.04em" }}>{label}</label>
+      {children}
+    </div>
+  );
+}
+
+function StatusPicker({ options, value, onChange, danger }) {
+  danger = danger || "En requête";
+  return (
+    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+      {options.map((o) => {
+        const active = value === o;
+        const isDanger = o === danger;
+        return (
+          <div key={o} onClick={() => onChange(active ? null : o)} style={{
+            padding: "7px 12px", borderRadius: 8, fontSize: 12.5, fontWeight: 600, cursor: "pointer",
+            border: "1px solid " + (active ? (isDanger ? RED : GOLD) : "rgba(255,255,255,0.1)"),
+            background: active ? (isDanger ? "rgba(229,72,77,0.15)" : "rgba(196,149,42,0.15)") : "rgba(255,255,255,0.02)",
+            color: active ? (isDanger ? "#FF8A8D" : GOLD) : MUTED,
+          }}>{o}</div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ModuleCard({ Icon, title, children }) {
+  return (
+    <div style={{ background: INK_2, border: "1px solid rgba(255,255,255,0.08)", borderRadius: 14, padding: 18, marginBottom: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+        <Icon size={16} color={GOLD} />
+        <span style={{ fontSize: 13, fontWeight: 700, color: PAPER, textTransform: "uppercase", letterSpacing: "0.04em" }}>{title}</span>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function StatPill({ label, value, tone }) {
+  const colors = { gold: GOLD, red: RED, amber: AMBER, muted: PAPER };
+  return (
+    <div style={{ background: INK_2, border: "1px solid rgba(255,255,255,0.08)", borderRadius: 12, padding: "14px 16px", flex: 1, minWidth: 120 }}>
+      <div style={{ fontSize: 10.5, color: MUTED, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>{label}</div>
+      <div style={{ fontSize: 22, fontWeight: 700, color: colors[tone] || PAPER }}>{value}</div>
+    </div>
+  );
+}
+
+function Toggle({ on, onChange, label }) {
+  return (
+    <div onClick={() => onChange(!on)} style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
+      {label && <span style={{ fontSize: 13, color: PAPER, fontWeight: 600 }}>{label}</span>}
+      <div style={{ width: 40, height: 22, borderRadius: 999, background: on ? GOLD : "rgba(255,255,255,0.15)", position: "relative", transition: "background .15s", flexShrink: 0 }}>
+        <div style={{ width: 18, height: 18, borderRadius: "50%", background: INK, position: "absolute", top: 2, left: on ? 20 : 2, transition: "left .15s" }} />
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Configuration point de départ ---------- */
+function StartSequenceSetup({ onConfirm }) {
+  const [prefixe, setPrefixe] = useState("OK26");
+  const [suffixe, setSuffixe] = useState("SS");
+  const [value, setValue] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const n = parseInt(value, 10);
+  const largeur = value.trim().length; // ex: "001" -> 3 chiffres, "01" -> 2 chiffres
+  const valid = value.trim() !== "" && /^\d+$/.test(value.trim()) && n > 0;
+  const apercu = valid ? prefixe + String(n).padStart(largeur, "0") + suffixe : "";
+
+  const handleConfirm = async () => {
+    if (!valid) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await setStartSequenceRemote(n, prefixe, suffixe, largeur);
+      const actual = await fetchStartSequence();
+      const fmt = await fetchRepertoireFormat();
+      onConfirm({
+        start: actual !== null ? actual : n,
+        prefixe: fmt ? fmt.prefixe : prefixe,
+        suffixe: fmt ? fmt.suffixe : suffixe,
+        largeur: fmt ? fmt.largeur : largeur,
+      });
+    } catch (e) {
+      setError("Impossible d'enregistrer le point de départ : " + (e.message || "erreur inconnue"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ maxWidth: 480, margin: "60px auto 0" }}>
+      <div style={{ textAlign: "center", marginBottom: 26 }}>
+        <div style={{ fontSize: 11, color: GOLD, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700, marginBottom: 8 }}>Première configuration</div>
+        <h1 style={{ fontSize: 22, fontWeight: 700, color: PAPER, margin: 0 }}>Format du répertoire</h1>
+        <p style={{ fontSize: 13.5, color: MUTED, marginTop: 10, lineHeight: 1.5 }}>
+          Définissez le préfixe, le suffixe et le nombre de départ. Le nombre de chiffres tapé (ex : 001 pour 3 chiffres, 01 pour 2 chiffres) sera conservé pour toute la numérotation qui suit.
+        </p>
+      </div>
+      <div style={{ background: INK_2, border: "1px solid rgba(255,255,255,0.08)", borderRadius: 16, padding: 24 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+          <Field label="Préfixe">
+            <input style={inputStyle} placeholder="Ex : OK26" value={prefixe} onChange={(e) => setPrefixe(e.target.value)} />
+          </Field>
+          <Field label="Suffixe">
+            <input style={inputStyle} placeholder="Ex : SS" value={suffixe} onChange={(e) => setSuffixe(e.target.value)} />
+          </Field>
+        </div>
+        <Field label="Nombre de départ">
+          <input style={inputStyle} placeholder="Ex : 001" value={value} onChange={(e) => setValue(e.target.value.replace(/[^0-9]/g, ""))} />
+        </Field>
+        {valid && (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 14px", background: "rgba(196,149,42,0.08)", border: "1px solid rgba(196,149,42,0.25)", borderRadius: 10, marginBottom: 4 }}>
+            <span style={{ fontSize: 13, color: GOLD, fontWeight: 600 }}>Premier dossier</span>
+            <span style={{ fontSize: 16, fontWeight: 700, color: GOLD, fontFamily: "ui-monospace, monospace" }}>{apercu}</span>
+          </div>
+        )}
+        {error && <div style={{ fontSize: 12.5, color: "#FF8A8D", marginTop: 8 }}>{error}</div>}
+        <button onClick={handleConfirm} disabled={!valid || saving} style={{
+          width: "100%", marginTop: 18, padding: "13px", borderRadius: 11, border: "none", background: GOLD, color: INK,
+          fontSize: 14.5, fontWeight: 700, cursor: valid && !saving ? "pointer" : "not-allowed", opacity: valid && !saving ? 1 : 0.5,
+          display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+        }}>
+          {saving && <IconLoader size={16} color={INK} style={{ animation: "spin 1s linear infinite" }} />}
+          {saving ? "Enregistrement…" : "Valider ce format"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Carte dossier ---------- */
+function DossierCard({ d, onOpen }) {
+  const urgency = urgencyOf(d);
+  const OpIcon = { Import: IconArrowDownRight, Export: IconArrowUpRight, Transit: IconArrowRightLeft }[d.type_op] || IconPackage;
+  const reste = (d.montant_total || 0) - (d.montant_paye || 0);
+  const borderColor = urgency === "red" ? "rgba(229,72,77,0.55)" : urgency === "yellow" ? "rgba(245,185,61,0.5)" : "rgba(255,255,255,0.08)";
+  const equipLabel = [d.nb_conteneurs_20 ? d.nb_conteneurs_20 + "x20'" : null, d.nb_conteneurs_40 ? d.nb_conteneurs_40 + "x40'" : null].filter(Boolean).join(" · ");
+  const paiementOk = d.paiement_simple === false ? reste <= 0 : d.paye;
+  const etat = niveauAffiche(d);
+
+  return (
+    <button onClick={() => onOpen(d)} style={{
+      textAlign: "left", width: "100%", cursor: "pointer", background: INK_2,
+      border: "1px solid " + borderColor, borderRadius: 14, padding: "16px 18px",
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+        <div style={{ display: "flex", gap: 12, minWidth: 0 }}>
+          <div style={{ width: 38, height: 38, borderRadius: 10, flexShrink: 0, background: "rgba(196,149,42,0.1)", border: "1px solid rgba(196,149,42,0.25)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <IconUser size={18} color={GOLD} />
+          </div>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 13.5, fontWeight: 600, color: PAPER }}>{d.repertoire}</span>
+              {urgency === "red" && <Badge tone="red"><IconAlertTriangle size={11} color="#FF8A8D" />48h+</Badge>}
+              {urgency === "yellow" && <Badge tone="amber"><IconClock size={11} color={AMBER} />En requête</Badge>}
+            </div>
+            <div style={{ fontSize: 13.5, color: PAPER, fontWeight: 600, marginTop: 2 }}>{d.client_nom || "Client non précisé"}</div>
+            {d.description_note && (
+              <div style={{ fontSize: 11.5, color: MUTED, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.description_note}</div>
+            )}
+          </div>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <OpIcon size={14} color={GOLD} />
+            <span style={{ fontSize: 12.5, color: PAPER, fontWeight: 600 }}>{d.type_op}</span>
+          </div>
+          {equipLabel && <span style={{ fontSize: 11, color: MUTED }}>{equipLabel}</span>}
+        </div>
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: MUTED, margin: "14px 0 6px" }}>
+        <span>Niveau</span>
+        <span style={{ color: GOLD, fontWeight: 600 }}>
+          {NIVEAU_LABEL[etat.niveau]}{etat.sousEtape ? " · " + etat.sousEtape : ""}
+        </span>
+      </div>
+
+      <div style={{ height: 1, background: "rgba(255,255,255,0.08)", margin: "10px 0 14px" }} />
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 14 }}>
+          <div>
+            <div style={{ fontSize: 10.5, color: MUTED, textTransform: "uppercase" }}>Paiement</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: paiementOk ? GREEN : "#FF8A8D", display: "flex", alignItems: "center", gap: 4 }}>
+              {paiementOk ? <IconCheck size={13} color={GREEN} /> : <IconX size={13} color="#FF8A8D" />}
+              {paiementOk ? "Payé" : (d.paiement_simple === false ? fmtFCFA(reste) + " restant" : "Non payé")}
+            </div>
+          </div>
+          {d.numero_bl && (
+            <div>
+              <div style={{ fontSize: 10.5, color: MUTED, textTransform: "uppercase" }}>BL</div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: PAPER }}>{d.numero_bl}</div>
+            </div>
+          )}
+        </div>
+      </div>
+    </button>
+  );
+}
+
+/* ---------- Formulaire nouveau dossier ---------- */
+function NewDossierForm({ onCancel, onCreate }) {
+  const [parcours, setParcours] = useState(null);
+  const [nouveauStatut, setNouveauStatut] = useState(null);
+  const [dateDossier, setDateDossier] = useState(new Date().toISOString().slice(0, 10));
+  const [modeRepertoire, setModeRepertoire] = useState("auto"); // "auto" | "manuel"
+  const [repertoireAuto, setRepertoireAuto] = useState(null);
+  const [seqAuto, setSeqAuto] = useState(null);
+  const [repertoireManuel, setRepertoireManuel] = useState("");
+  const [checkingRepertoire, setCheckingRepertoire] = useState(false);
+  const [repertoireDejaPris, setRepertoireDejaPris] = useState(false);
+  const [loadingNumero, setLoadingNumero] = useState(true);
+  const [clientNom, setClientNom] = useState("");
+  const [descriptionNote, setDescriptionNote] = useState("");
+  const [numeroBl, setNumeroBl] = useState("");
+  const [typeOp, setTypeOp] = useState(null);
+  const [typeMarchandise, setTypeMarchandise] = useState("");
+  const [nb20, setNb20] = useState("");
+  const [nb40, setNb40] = useState("");
+  const [paiementSimple, setPaiementSimple] = useState(true);
+  const [paye, setPaye] = useState(null);
+  const [montantTotal, setMontantTotal] = useState("");
+  const [montantPaye, setMontantPaye] = useState("");
+  const [payeChez, setPayeChez] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getNextRepertoire().then(({ repertoire, sequence_number }) => {
+      if (cancelled) return;
+      setRepertoireAuto(repertoire);
+      setSeqAuto(sequence_number);
+      setLoadingNumero(false);
+    }).catch(() => { if (!cancelled) setLoadingNumero(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (modeRepertoire !== "manuel" || !repertoireManuel.trim()) {
+      setRepertoireDejaPris(false);
+      return;
+    }
+    let cancelled = false;
+    setCheckingRepertoire(true);
+    const t = setTimeout(() => {
+      repertoireExists(repertoireManuel.trim()).then((exists) => {
+        if (cancelled) return;
+        setRepertoireDejaPris(exists);
+        setCheckingRepertoire(false);
+      }).catch(() => { if (!cancelled) setCheckingRepertoire(false); });
+    }, 400);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [repertoireManuel, modeRepertoire]);
+
+  const reste = Math.max(0, (parseFloat(montantTotal) || 0) - (parseFloat(montantPaye) || 0));
+  const clientValid = clientNom.trim() !== "";
+  const repertoireFinal = modeRepertoire === "auto" ? repertoireAuto : repertoireManuel.trim();
+  const repertoireValid = modeRepertoire === "auto" ? !!repertoireAuto : (repertoireManuel.trim() !== "" && !repertoireDejaPris && !checkingRepertoire);
+  const canSubmit = clientValid && repertoireValid && !loadingNumero;
+
+  const handleSubmit = async () => {
+    if (!clientValid) { setError("Le nom du client est obligatoire."); return; }
+    if (!repertoireValid) { setError("Le répertoire n'est pas valide ou existe déjà."); return; }
+    setSaving(true);
+    setError(null);
+    try {
+      let repertoire = repertoireFinal;
+      let sequence_number = seqAuto;
+      if (modeRepertoire === "auto") {
+        const fresh = await getNextRepertoire();
+        repertoire = fresh.repertoire;
+        sequence_number = fresh.sequence_number;
+      } else {
+        const exists = await repertoireExists(repertoire);
+        if (exists) { setError("Ce répertoire existe déjà. Choisissez-en un autre."); setSaving(false); return; }
+        const match = repertoire.match(/^\D*(\d+)\D*$/);
+        sequence_number = match ? parseInt(match[1], 10) : 0;
+      }
+
+      const payload = {
+        repertoire, sequence_number,
+        date_dossier: dateDossier,
+        parcours,
+        nouveau_dossier_statut: nouveauStatut,
+        client_nom: clientNom.trim(),
+        description_note: descriptionNote || null,
+        numero_bl: numeroBl || null,
+        type_op: typeOp,
+        type_marchandise: typeMarchandise || null,
+        marchandise: typeMarchandise || null,
+        nb_conteneurs_20: parseInt(nb20, 10) || 0,
+        nb_conteneurs_40: parseInt(nb40, 10) || 0,
+        statut_avd: null,
+        statut_avd_changed_at: null,
+        statuts_licences: [],
+        exo_licence160: null,
+        exo_attestation: null,
+        declaration_statut2: null,
+        declaration_tiree_at: null,
+        numero_declaration: null,
+        paiement_simple: paiementSimple,
+        paye: paiementSimple ? !!paye : false,
+        montant_total: parseFloat(montantTotal) || 0,
+        montant_paye: parseFloat(montantPaye) || 0,
+        paye_chez: payeChez,
+      };
+      const { data, error: insertError } = await supabase.from("dossiers").insert(payload).select().single();
+      if (insertError) throw insertError;
+      onCreate(data);
+    } catch (e) {
+      setError("Impossible de créer le dossier : " + (e.message || "erreur inconnue"));
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ maxWidth: 640, margin: "0 auto", paddingBottom: 90 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 22 }}>
+        <button onClick={onCancel} style={{ background: "none", border: "none", cursor: "pointer", padding: 6, borderRadius: 8, display: "flex" }}>
+          <IconArrowLeft size={20} color={MUTED} />
+        </button>
+        <div>
+          <div style={{ fontSize: 11, color: MUTED, textTransform: "uppercase", letterSpacing: "0.06em" }}>Nouveau dossier</div>
+          <div style={{ fontSize: 20, fontWeight: 700, color: PAPER }}>Le numéro sera attribué à la création</div>
+        </div>
+      </div>
+
+      <div style={{ background: INK_2, border: "1px solid rgba(255,255,255,0.08)", borderRadius: 16, padding: 24 }}>
+        <Field label="Répertoire">
+          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            <div style={selectChipStyle(modeRepertoire === "auto")} onClick={() => setModeRepertoire("auto")}>Automatique</div>
+            <div style={selectChipStyle(modeRepertoire === "manuel")} onClick={() => setModeRepertoire("manuel")}>Taper un répertoire existant</div>
+          </div>
+          {modeRepertoire === "auto" ? (
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 14px", background: "rgba(196,149,42,0.08)", border: "1px solid rgba(196,149,42,0.25)", borderRadius: 10 }}>
+              <span style={{ fontSize: 13, color: GOLD, fontWeight: 600 }}>Prochain numéro</span>
+              <span style={{ fontSize: 15, fontWeight: 700, color: GOLD, fontFamily: "ui-monospace, monospace" }}>
+                {loadingNumero ? <IconLoader size={14} color={GOLD} style={{ animation: "spin 1s linear infinite" }} /> : repertoireAuto}
+              </span>
+            </div>
+          ) : (
+            <div>
+              <input
+                style={{ ...inputStyle, borderColor: repertoireManuel.trim() && repertoireDejaPris ? RED : "rgba(255,255,255,0.12)" }}
+                placeholder="Ex : OK26150SS"
+                value={repertoireManuel}
+                onChange={(e) => setRepertoireManuel(e.target.value.toUpperCase())}
+              />
+              {checkingRepertoire && (
+                <div style={{ fontSize: 12, color: MUTED, marginTop: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                  <IconLoader size={12} color={MUTED} style={{ animation: "spin 1s linear infinite" }} /> Vérification…
+                </div>
+              )}
+              {!checkingRepertoire && repertoireManuel.trim() && repertoireDejaPris && (
+                <div style={{ fontSize: 12, color: "#FF8A8D", marginTop: 6 }}>Ce répertoire existe déjà. Impossible de continuer avec ce numéro.</div>
+              )}
+              {!checkingRepertoire && repertoireManuel.trim() && !repertoireDejaPris && (
+                <div style={{ fontSize: 12, color: GREEN, marginTop: 6 }}>Répertoire disponible.</div>
+              )}
+              <div style={{ fontSize: 11.5, color: MUTED, marginTop: 8 }}>
+                Le prochain numéro automatique restera <span style={{ color: GOLD, fontFamily: "ui-monospace, monospace" }}>{repertoireAuto}</span> quel que soit le répertoire tapé ici.
+              </div>
+            </div>
+          )}
+        </Field>
+
+        <Field label="Date du dossier">
+          <input style={inputStyle} type="date" value={dateDossier} onChange={(e) => setDateDossier(e.target.value)} />
+        </Field>
+
+        <div style={{ height: 1, background: "rgba(196,149,42,0.3)", margin: "20px 0" }} />
+
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {TYPES_OP.map((t) => <div key={t} style={selectChipStyle(typeOp === t)} onClick={() => setTypeOp(typeOp === t ? null : t)}>{t}</div>)}
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {PARCOURS.map((p) => <div key={p.key} style={selectChipStyle(parcours === p.key)} onClick={() => setParcours(parcours === p.key ? null : p.key)}>{p.label}</div>)}
+          </div>
+        </div>
+
+        <Field label="État du dossier">
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {NOUVEAU_DOSSIER_STATUTS.map((s) => <div key={s} style={selectChipStyle(nouveauStatut === s)} onClick={() => setNouveauStatut(nouveauStatut === s ? null : s)}>{s}</div>)}
+          </div>
+        </Field>
+
+        <div style={{ height: 1, background: "rgba(196,149,42,0.3)", margin: "20px 0" }} />
+
+        <Field label="Nom du client (obligatoire)">
+          <input style={inputStyle} placeholder="Ex : Société ABC Sarl" value={clientNom} onChange={(e) => setClientNom(e.target.value)} />
+        </Field>
+
+        <Field label="Description / Note (facultatif)">
+          <input style={inputStyle} placeholder="Ex : Client prioritaire, appel avant retrait" value={descriptionNote} onChange={(e) => setDescriptionNote(e.target.value)} />
+        </Field>
+
+        <Field label="Numéro de BL">
+          <input style={inputStyle} placeholder="Ex : MSCU1234567" value={numeroBl} onChange={(e) => setNumeroBl(e.target.value)} />
+        </Field>
+
+        <Field label="Type de marchandise">
+          <input style={inputStyle} placeholder="Ex : Pièces détachées auto" value={typeMarchandise} onChange={(e) => setTypeMarchandise(e.target.value)} />
+        </Field>
+
+        <Field label="Équipement">
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+            <div>
+              <label style={{ display: "block", fontSize: 11, color: MUTED, marginBottom: 6 }}>Conteneurs 20'</label>
+              <input style={inputStyle} type="number" min="0" placeholder="0" value={nb20} onChange={(e) => setNb20(e.target.value)} />
+            </div>
+            <div>
+              <label style={{ display: "block", fontSize: 11, color: MUTED, marginBottom: 6 }}>Conteneurs 40'</label>
+              <input style={inputStyle} type="number" min="0" placeholder="0" value={nb40} onChange={(e) => setNb40(e.target.value)} />
+            </div>
+          </div>
+        </Field>
+
+        <div style={{ height: 1, background: "rgba(196,149,42,0.3)", margin: "20px 0" }} />
+
+        <div style={{ marginBottom: 16 }}>
+          <Toggle on={!paiementSimple} onChange={(v) => setPaiementSimple(!v)} label="Mode détails (montants)" />
+        </div>
+
+        {paiementSimple ? (
+          <Field label="Paiement">
+            <div style={{ display: "flex", gap: 8 }}>
+              <div onClick={() => setPaye(paye === true ? null : true)} style={{
+                flex: 1, textAlign: "center", padding: "12px", borderRadius: 10, cursor: "pointer", fontWeight: 700, fontSize: 13.5,
+                border: "1px solid " + (paye === true ? GREEN : "rgba(255,255,255,0.12)"),
+                background: paye === true ? "rgba(63,201,138,0.15)" : "rgba(255,255,255,0.03)",
+                color: paye === true ? GREEN : MUTED,
+              }}><IconCheck size={14} color={paye === true ? GREEN : MUTED} style={{ marginRight: 6, display: "inline-block", verticalAlign: -2 }} />Payé</div>
+              <div onClick={() => setPaye(paye === false ? null : false)} style={{
+                flex: 1, textAlign: "center", padding: "12px", borderRadius: 10, cursor: "pointer", fontWeight: 700, fontSize: 13.5,
+                border: "1px solid " + (paye === false ? RED : "rgba(255,255,255,0.12)"),
+                background: paye === false ? "rgba(229,72,77,0.15)" : "rgba(255,255,255,0.03)",
+                color: paye === false ? "#FF8A8D" : MUTED,
+              }}><IconX size={14} color={paye === false ? "#FF8A8D" : MUTED} style={{ marginRight: 6, display: "inline-block", verticalAlign: -2 }} />Non payé</div>
+            </div>
+          </Field>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+            <Field label="Montant attendu (FCFA)">
+              <input style={inputStyle} type="number" placeholder="0" value={montantTotal} onChange={(e) => setMontantTotal(e.target.value)} />
+            </Field>
+            <Field label="Montant payé (FCFA)">
+              <input style={inputStyle} type="number" placeholder="0" value={montantPaye} onChange={(e) => setMontantPaye(e.target.value)} />
+            </Field>
+          </div>
+        )}
+
+        <Field label="Payé chez">
+          <div style={{ display: "flex", gap: 8 }}>
+            {PAYE_CHEZ_DEFAUT.map((p) => <div key={p} style={selectChipStyle(payeChez === p)} onClick={() => setPayeChez(payeChez === p ? null : p)}>{p}</div>)}
+          </div>
+        </Field>
+
+        {!paiementSimple && (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 14px", background: "rgba(229,72,77,0.08)", border: "1px solid rgba(229,72,77,0.25)", borderRadius: 10 }}>
+            <span style={{ fontSize: 13, color: "#FF8A8D", fontWeight: 600 }}>Reste dû (calcul automatique)</span>
+            <span style={{ fontSize: 16, fontWeight: 700, color: "#FF8A8D" }}>{fmtFCFA(reste)}</span>
+          </div>
+        )}
+
+        {error && <div style={{ fontSize: 12.5, color: "#FF8A8D", marginTop: 10 }}>{error}</div>}
+      </div>
+
+      <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, padding: "14px 16px", background: INK, borderTop: "1px solid rgba(255,255,255,0.08)", zIndex: 20 }}>
+        <div style={{ maxWidth: 640, margin: "0 auto" }}>
+          <button onClick={handleSubmit} disabled={saving || !canSubmit} style={{
+            width: "100%", padding: "13px", borderRadius: 11, border: "none", background: GOLD, color: INK,
+            fontSize: 14.5, fontWeight: 700, cursor: (saving || !canSubmit) ? "not-allowed" : "pointer", display: "flex",
+            alignItems: "center", justifyContent: "center", gap: 8, opacity: (saving || !canSubmit) ? 0.5 : 1,
+          }}>
+            {saving ? <IconLoader size={16} color={INK} style={{ animation: "spin 1s linear infinite" }} /> : <IconFileCheck size={16} color={INK} />}
+            {saving ? "Création…" : "Créer le dossier"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Détail dossier ---------- */
+function DossierDetail({ dossier, onBack, onUpdate }) {
+  const [draft, setDraft] = useState(dossier);
+  const [saving, setSaving] = useState(false);
+  const [tab, setTab] = useState("client");
+  const urgency = urgencyOf(draft);
+
+  useEffect(() => { setDraft(dossier); }, [dossier]);
+
+  const dirty = JSON.stringify(draft) !== JSON.stringify(dossier);
+
+  const set = (patch) => setDraft((prev) => ({ ...prev, ...patch }));
+
+  const setAvd = (statut) => {
+    set({ statut_avd: statut, statut_avd_changed_at: statut ? new Date().toISOString() : null });
+  };
+
+  const toggleLicence = (type) => {
+    const exists = (draft.statuts_licences || []).find((l) => l.type === type);
+    const statuts_licences = exists
+      ? draft.statuts_licences.filter((l) => l.type !== type)
+      : [...(draft.statuts_licences || []), { type, statut: "À payer" }];
+    set({ statuts_licences });
+  };
+
+  const setLicenceStatut = (type, statut) => {
+    const statuts_licences = statut === null
+      ? (draft.statuts_licences || []).filter((l) => l.type !== type)
+      : (draft.statuts_licences || []).map((l) => (l.type === type ? { ...l, statut } : l));
+    set({ statuts_licences });
+  };
+
+  const setExo = (field, statut) => set({ [field]: statut });
+
+  const setDeclaration2 = (statut) => {
+    const now = new Date().toISOString();
+    const patch = { declaration_statut2: statut };
+    patch.declaration_tiree_at = statut ? (draft.declaration_tiree_at || now) : null;
+    if (statut === "USN émis") patch.usn_emis_at = now;
+    if (statut === "USN payé") patch.usn_paye_at = now;
+    set(patch);
+  };
+
+  const [saveError, setSaveError] = useState(null);
+
+  const handleValider = async () => {
+    setSaving(true);
+    setSaveError(null);
+    // On n'envoie que les champs réellement modifiés, et jamais les champs système
+    // (id, created_at, updated_at, reste_a_payer qui est une colonne générée en base).
+    const champsInterdits = ["id", "created_at", "updated_at", "reste_a_payer", "repertoire", "sequence_number"];
+    const patch = {};
+    Object.keys(draft).forEach((k) => {
+      if (champsInterdits.includes(k)) return;
+      if (JSON.stringify(draft[k]) !== JSON.stringify(dossier[k])) patch[k] = draft[k];
+    });
+    if (Object.keys(patch).length === 0) { setSaving(false); return; }
+
+    const { data, error } = await supabase.from("dossiers").update(patch).eq("id", draft.id).select().single();
+    setSaving(false);
+    if (error) { setSaveError("Échec de l'enregistrement : " + error.message); return; }
+    setDraft(data);
+    onUpdate(data);
+  };
+
+  const handleAnnuler = () => { setDraft(dossier); setSaveError(null); };
+
+  const reste = (draft.montant_total || 0) - (draft.montant_paye || 0);
+  const equipLabel = [draft.nb_conteneurs_20 ? draft.nb_conteneurs_20 + "x20'" : null, draft.nb_conteneurs_40 ? draft.nb_conteneurs_40 + "x40'" : null].filter(Boolean).join(" · ");
+  const etat = niveauAffiche(draft);
+  const paiementOk = draft.paiement_simple === false ? reste <= 0 : draft.paye;
+
+  const TABS = [
+    { key: "client", label: "Client" },
+    { key: "parcours", label: "Parcours" },
+    { key: "paiement", label: "Paiement" },
+  ];
+
+  return (
+    <div style={{ maxWidth: 760, margin: "0 auto", paddingBottom: dirty ? 90 : 20 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20, flexWrap: "wrap", gap: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <button onClick={onBack} style={{ background: "none", border: "none", cursor: "pointer", padding: 6, borderRadius: 8, display: "flex" }}>
+            <IconArrowLeft size={20} color={MUTED} />
+          </button>
+          <div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: PAPER, fontFamily: "ui-monospace, monospace" }}>{draft.repertoire}</div>
+            <div style={{ fontSize: 12.5, color: MUTED }}>{draft.type_op}{equipLabel ? " · " + equipLabel : ""}{draft.numero_bl ? " · BL " + draft.numero_bl : ""}</div>
+            <div style={{ fontSize: 12, color: GOLD, fontWeight: 600, marginTop: 3 }}>{NIVEAU_LABEL[etat.niveau]}{etat.sousEtape ? " · " + etat.sousEtape : ""}</div>
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {urgency === "red" && <Badge tone="red"><IconAlertTriangle size={12} color="#FF8A8D" />Retard 48h+</Badge>}
+          {urgency === "yellow" && <Badge tone="amber"><IconClock size={12} color={AMBER} />En requête</Badge>}
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 4, marginBottom: 20, background: INK_2, borderRadius: 12, padding: 4, border: "1px solid rgba(255,255,255,0.08)" }}>
+        {TABS.map((t) => (
+          <button key={t.key} onClick={() => setTab(t.key)} style={{
+            flex: 1, padding: "10px", borderRadius: 9, border: "none", cursor: "pointer",
+            background: tab === t.key ? GOLD : "transparent", color: tab === t.key ? INK : MUTED,
+            fontSize: 13.5, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+          }}>
+            {t.key === "paiement" && (paiementOk ? <IconCheck size={13} color={tab === t.key ? INK : GREEN} /> : <IconX size={13} color={tab === t.key ? INK : "#FF8A8D"} />)}
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "client" && (
+        <ModuleCard Icon={IconUser} title="Client">
+          <Field label="Nom du client">
+            <input style={inputStyle} value={draft.client_nom || ""} onChange={(e) => set({ client_nom: e.target.value })} />
+          </Field>
+          <Field label="Description / Note">
+            <input style={inputStyle} value={draft.description_note || ""} onChange={(e) => set({ description_note: e.target.value })} />
+          </Field>
+          <Field label="Numéro de BL">
+            <input style={inputStyle} value={draft.numero_bl || ""} onChange={(e) => set({ numero_bl: e.target.value })} />
+          </Field>
+          <Field label="Date du dossier">
+            <input style={inputStyle} type="date" value={draft.date_dossier || ""} onChange={(e) => set({ date_dossier: e.target.value })} />
+          </Field>
+        </ModuleCard>
+      )}
+
+      {tab === "parcours" && (
+        <React.Fragment>
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {TYPES_OP.map((t) => <div key={t} style={selectChipStyle(draft.type_op === t)} onClick={() => set({ type_op: draft.type_op === t ? null : t })}>{t}</div>)}
+            </div>
+          </div>
+
+          <div style={{ height: 1, background: "rgba(196,149,42,0.3)", margin: "16px 0" }} />
+
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {PARCOURS.map((p) => <div key={p.key} style={selectChipStyle(draft.parcours === p.key)} onClick={() => set({ parcours: draft.parcours === p.key ? null : p.key })}>{p.label}</div>)}
+            </div>
+          </div>
+
+          <ModuleCard Icon={IconFileCheck} title="Nouveau dossier">
+            <StatusPicker options={NOUVEAU_DOSSIER_STATUTS} value={draft.nouveau_dossier_statut} onChange={(s) => set({ nouveau_dossier_statut: s })} danger="En attente de documents" />
+          </ModuleCard>
+
+          {draft.parcours === "AVD" && (
+            <ModuleCard Icon={IconShieldCheck} title="AVD">
+              <StatusPicker options={AVD_STATUTS} value={draft.statut_avd} onChange={setAvd} />
+              {draft.statut_avd === "En requête" && (
+                <div style={{ marginTop: 10, fontSize: 12, color: AMBER }}>En requête depuis {timeAgo(draft.statut_avd_changed_at)}</div>
+              )}
+            </ModuleCard>
+          )}
+
+          {draft.parcours === "AVD" && (
+            <ModuleCard Icon={IconFileCheck} title="Licences">
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+                {LICENCE_TYPES.map((t) => {
+                  const active = (draft.statuts_licences || []).some((l) => l.type === t);
+                  return (
+                    <div key={t} onClick={() => toggleLicence(t)} style={{
+                      padding: "7px 13px", borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+                      border: "1px solid " + (active ? GOLD : "rgba(255,255,255,0.1)"),
+                      background: active ? "rgba(196,149,42,0.16)" : "rgba(255,255,255,0.02)",
+                      color: active ? GOLD : MUTED,
+                    }}>Licence {t}</div>
+                  );
+                })}
+              </div>
+              {(draft.statuts_licences || []).map((l) => (
+                <div key={l.type} style={{ marginBottom: 12, paddingLeft: 12, borderLeft: "2px solid rgba(196,149,42,0.3)" }}>
+                  <div style={{ fontSize: 12, color: GOLD, fontWeight: 700, marginBottom: 6 }}>Licence {l.type}</div>
+                  <StatusPicker options={LICENCE_STATUTS} value={l.statut} onChange={(s) => setLicenceStatut(l.type, s)} danger="En suspens" />
+                </div>
+              ))}
+              {(draft.statuts_licences || []).length === 0 && <div style={{ fontSize: 12.5, color: MUTED }}>Aucune licence sélectionnée.</div>}
+            </ModuleCard>
+          )}
+
+          {draft.parcours === "Exoneration" && (
+            <ModuleCard Icon={IconShieldCheck} title="Exonération">
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: 12, color: MUTED, fontWeight: 600, marginBottom: 6 }}>Licence 160</div>
+                <StatusPicker options={EXO_STATUTS} value={draft.exo_licence160} onChange={(s) => setExo("exo_licence160", s)} danger="En suspens" />
+              </div>
+              <div>
+                <div style={{ fontSize: 12, color: MUTED, fontWeight: 600, marginBottom: 6 }}>Attestation d'exonération</div>
+                <StatusPicker options={EXO_STATUTS} value={draft.exo_attestation} onChange={(s) => setExo("exo_attestation", s)} danger="En suspens" />
+              </div>
+            </ModuleCard>
+          )}
+
+          <ModuleCard Icon={IconReceipt} title="Déclaration">
+            <StatusPicker options={DECL_STATUTS2} value={draft.declaration_statut2} onChange={setDeclaration2} danger="" />
+            {draft.declaration_tiree_at && (
+              <div style={{ marginTop: 10, fontSize: 12, color: MUTED }}>Tirée depuis {timeAgo(draft.declaration_tiree_at)}</div>
+            )}
+            {draft.declaration_statut2 && (
+              <div style={{ marginTop: 14 }}>
+                <input style={inputStyle} placeholder="Numéro déclaration + date" value={draft.numero_declaration || ""} onChange={(e) => set({ numero_declaration: e.target.value })} />
+              </div>
+            )}
+          </ModuleCard>
+        </React.Fragment>
+      )}
+
+      {tab === "paiement" && (
+        <ModuleCard Icon={IconWallet} title="Paiement">
+          <div style={{ marginBottom: 16 }}>
+            <Toggle on={draft.paiement_simple === false} onChange={(v) => set({ paiement_simple: !v })} label="Mode détails (montants)" />
+          </div>
+
+          {draft.paiement_simple !== false ? (
+            <Field label="Statut">
+              <div style={{ display: "flex", gap: 8 }}>
+                <div onClick={() => set({ paye: draft.paye === true ? null : true })} style={{
+                  flex: 1, textAlign: "center", padding: "12px", borderRadius: 10, cursor: "pointer", fontWeight: 700, fontSize: 13.5,
+                  border: "1px solid " + (draft.paye === true ? GREEN : "rgba(255,255,255,0.12)"),
+                  background: draft.paye === true ? "rgba(63,201,138,0.15)" : "rgba(255,255,255,0.03)",
+                  color: draft.paye === true ? GREEN : MUTED,
+                }}><IconCheck size={14} color={draft.paye === true ? GREEN : MUTED} style={{ marginRight: 6, display: "inline-block", verticalAlign: -2 }} />Payé</div>
+                <div onClick={() => set({ paye: draft.paye === false ? null : false })} style={{
+                  flex: 1, textAlign: "center", padding: "12px", borderRadius: 10, cursor: "pointer", fontWeight: 700, fontSize: 13.5,
+                  border: "1px solid " + (draft.paye === false ? RED : "rgba(255,255,255,0.12)"),
+                  background: draft.paye === false ? "rgba(229,72,77,0.15)" : "rgba(255,255,255,0.03)",
+                  color: draft.paye === false ? "#FF8A8D" : MUTED,
+                }}><IconX size={14} color={draft.paye === false ? "#FF8A8D" : MUTED} style={{ marginRight: 6, display: "inline-block", verticalAlign: -2 }} />Non payé</div>
+              </div>
+            </Field>
+          ) : (
+            <React.Fragment>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                <Field label="Montant attendu">
+                  <input style={inputStyle} type="number" value={draft.montant_total} onChange={(e) => set({ montant_total: parseFloat(e.target.value) || 0 })} />
+                </Field>
+                <Field label="Montant payé">
+                  <input style={inputStyle} type="number" value={draft.montant_paye} onChange={(e) => set({ montant_paye: parseFloat(e.target.value) || 0 })} />
+                </Field>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 14px", background: reste > 0 ? "rgba(229,72,77,0.08)" : "rgba(63,201,138,0.08)", border: "1px solid " + (reste > 0 ? "rgba(229,72,77,0.25)" : "rgba(63,201,138,0.25)"), borderRadius: 10, marginBottom: 16 }}>
+                <span style={{ fontSize: 13, fontWeight: 600, color: reste > 0 ? "#FF8A8D" : GREEN }}>Reste dû</span>
+                <span style={{ fontSize: 16, fontWeight: 700, color: reste > 0 ? "#FF8A8D" : GREEN }}>{fmtFCFA(reste)}</span>
+              </div>
+            </React.Fragment>
+          )}
+
+          <Field label="Payé chez">
+            <div style={{ display: "flex", gap: 8 }}>
+              {PAYE_CHEZ_DEFAUT.map((p) => (
+                <div key={p} style={selectChipStyle(draft.paye_chez === p)} onClick={() => set({ paye_chez: draft.paye_chez === p ? null : p })}>{p}</div>
+              ))}
+            </div>
+          </Field>
+        </ModuleCard>
+      )}
+
+      {dirty && (
+        <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, padding: "14px 16px", background: INK, borderTop: "1px solid rgba(255,255,255,0.08)", zIndex: 20 }}>
+          <div style={{ maxWidth: 760, margin: "0 auto" }}>
+            {saveError && <div style={{ fontSize: 12.5, color: "#FF8A8D", marginBottom: 8 }}>{saveError}</div>}
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={handleAnnuler} style={{ padding: "13px 20px", borderRadius: 11, border: "1px solid rgba(255,255,255,0.12)", background: "transparent", color: MUTED, fontWeight: 600, cursor: "pointer" }}>Annuler</button>
+              <button onClick={handleValider} disabled={saving} style={{
+                flex: 1, padding: "13px", borderRadius: 11, border: "none", background: GOLD, color: INK,
+                fontSize: 14.5, fontWeight: 700, cursor: saving ? "not-allowed" : "pointer", display: "flex",
+                alignItems: "center", justifyContent: "center", gap: 8, opacity: saving ? 0.7 : 1,
+              }}>
+                {saving && <IconLoader size={16} color={INK} style={{ animation: "spin 1s linear infinite" }} />}
+                {saving ? "Enregistrement…" : "Valider les modifications"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------- Dashboard ---------- */
+function Dashboard({ dossiers, onOpen, onNew, onEditStart }) {
+  const [filterOp, setFilterOp] = useState("Tous");
+  const [filterNiveau, setFilterNiveau] = useState("Tous");
+  const [filterSousEtape, setFilterSousEtape] = useState("Tous");
+  const [filterUrgency, setFilterUrgency] = useState("Tous");
+  const [filterPaiement, setFilterPaiement] = useState("Tous"); // Tous | Paye | NonPaye
+  const [alertesActives, setAlertesActives] = useState(true);
+  const [showFiltres, setShowFiltres] = useState(false);
+  const [search, setSearch] = useState("");
+
+  const withUrgency = dossiers.map((d) => ({ ...d, _urgency: alertesActives ? urgencyOf(d) : null }));
+  const red = dossiers.filter((d) => urgencyOf(d) === "red").length;
+  const yellow = dossiers.filter((d) => urgencyOf(d) === "yellow").length;
+  const resteTotal = dossiers.reduce((s, d) => s + Math.max(0, (d.montant_total || 0) - (d.montant_paye || 0)), 0);
+
+  const estPaye = (d) => (d.paiement_simple === false ? (d.montant_total || 0) - (d.montant_paye || 0) <= 0 : !!d.paye);
+
+  // Sous-étapes disponibles pour le niveau sélectionné (pour affiner le filtre)
+  const sousEtapesDisponibles = filterNiveau === "AVD" ? AVD_STATUTS
+    : filterNiveau === "Exoneration" ? EXO_STATUTS
+    : filterNiveau === "Declaration" ? DECL_STATUTS2
+    : filterNiveau === "Nouveau" ? NOUVEAU_DOSSIER_STATUTS
+    : [];
+
+  const filtered = withUrgency
+    .filter((d) => filterOp === "Tous" || d.type_op === filterOp)
+    .filter((d) => filterNiveau === "Tous" || niveauAffiche(d).niveau === filterNiveau)
+    .filter((d) => filterSousEtape === "Tous" || niveauAffiche(d).sousEtape === filterSousEtape)
+    .filter((d) => filterUrgency === "Tous" || d._urgency === filterUrgency)
+    .filter((d) => filterPaiement === "Tous" || (filterPaiement === "Paye" ? estPaye(d) : !estPaye(d)))
+    .filter((d) => !search || d.repertoire.toLowerCase().includes(search.toLowerCase()) || (d.client_nom || "").toLowerCase().includes(search.toLowerCase()) || (d.type_marchandise || "").toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => b.sequence_number - a.sequence_number);
+
+  const filtresActifs = [filterOp !== "Tous", filterUrgency !== "Tous", filterPaiement !== "Tous"].filter(Boolean).length;
+
+  return (
+    <div style={{ maxWidth: 980, margin: "0 auto" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 22, flexWrap: "wrap", gap: 14 }}>
+        <div>
+          <div style={{ fontSize: 11, color: GOLD, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700, marginBottom: 4 }}>SOUF-SOUM Transit</div>
+          <h1 style={{ fontSize: 26, fontWeight: 700, color: PAPER, margin: 0 }}>Suivi des dossiers</h1>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={onEditStart} title="Modifier le format du répertoire" style={{
+            display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 11,
+            border: "1px solid rgba(255,255,255,0.12)", background: "transparent", color: MUTED, cursor: "pointer",
+          }}><IconSettings size={16} color={MUTED} /></button>
+          <button onClick={onNew} style={{
+            display: "flex", alignItems: "center", gap: 8, padding: "11px 18px", borderRadius: 11,
+            border: "none", background: GOLD, color: INK, fontSize: 14, fontWeight: 700, cursor: "pointer",
+          }}><IconPlus size={17} color={INK} /> Nouveau dossier</button>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 12, marginBottom: 22, flexWrap: "wrap" }}>
+        <StatPill label="Dossiers actifs" value={dossiers.length} tone="gold" />
+        <StatPill label="Alertes rouges" value={red} tone="red" />
+        <StatPill label="En surveillance" value={yellow} tone="amber" />
+      </div>
+
+      <div style={{ position: "relative", flex: "1 1 220px", marginBottom: 14 }}>
+        <IconSearch size={15} color={MUTED} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)" }} />
+        <input placeholder="Rechercher un répertoire, un client…" value={search} onChange={(e) => setSearch(e.target.value)} style={{ ...inputStyle, paddingLeft: 36 }} />
+      </div>
+
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+        {["Tous", ...NIVEAUX].map((n) => (
+          <div key={n} onClick={() => { setFilterNiveau(n); setFilterSousEtape("Tous"); }} style={selectChipStyle(filterNiveau === n)}>{n === "Tous" ? "Tous les niveaux" : NIVEAU_LABEL[n]}</div>
+        ))}
+      </div>
+
+      {sousEtapesDisponibles.length > 0 && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14, paddingLeft: 8, borderLeft: "2px solid rgba(196,149,42,0.3)" }}>
+          {["Tous", ...sousEtapesDisponibles].map((s) => (
+            <div key={s} onClick={() => setFilterSousEtape(s)} style={{ ...selectChipStyle(filterSousEtape === s), fontSize: 12 }}>{s}</div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ marginBottom: 18 }}>
+        <button onClick={() => setShowFiltres(!showFiltres)} style={{
+          display: "flex", alignItems: "center", gap: 8, background: "none", border: "1px solid rgba(255,255,255,0.1)",
+          borderRadius: 10, padding: "9px 14px", color: MUTED, fontSize: 13, fontWeight: 600, cursor: "pointer",
+        }}>
+          <IconFilter size={14} color={MUTED} />
+          Filtres avancés{filtresActifs > 0 ? " (" + filtresActifs + ")" : ""}
+          <IconChevronRight size={14} color={MUTED} style={{ transform: showFiltres ? "rotate(90deg)" : "none", transition: "transform .15s" }} />
+        </button>
+
+        {showFiltres && (
+          <div style={{ marginTop: 12, padding: 16, background: INK_2, border: "1px solid rgba(255,255,255,0.08)", borderRadius: 12, display: "flex", flexDirection: "column", gap: 14 }}>
+            <div>
+              <div style={{ fontSize: 11, color: MUTED, textTransform: "uppercase", marginBottom: 8 }}>Type d'opération</div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {["Tous", ...TYPES_OP].map((t) => <div key={t} onClick={() => setFilterOp(t)} style={selectChipStyle(filterOp === t)}>{t}</div>)}
+              </div>
+            </div>
+
+            <div>
+              <div style={{ fontSize: 11, color: MUTED, textTransform: "uppercase", marginBottom: 8 }}>Paiement</div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                <div onClick={() => setFilterPaiement("Tous")} style={selectChipStyle(filterPaiement === "Tous")}>Tous</div>
+                <div onClick={() => setFilterPaiement("Paye")} style={{
+                  ...selectChipStyle(filterPaiement === "Paye"),
+                  borderColor: filterPaiement === "Paye" ? GREEN : "rgba(255,255,255,0.12)",
+                  color: filterPaiement === "Paye" ? GREEN : MUTED,
+                  background: filterPaiement === "Paye" ? "rgba(63,201,138,0.14)" : "rgba(255,255,255,0.03)",
+                }}><IconCheck size={12} color={filterPaiement === "Paye" ? GREEN : MUTED} style={{ marginRight: 5, display: "inline-block", verticalAlign: -1 }} />Payé</div>
+                <div onClick={() => setFilterPaiement("NonPaye")} style={{
+                  ...selectChipStyle(filterPaiement === "NonPaye"),
+                  borderColor: filterPaiement === "NonPaye" ? RED : "rgba(255,255,255,0.12)",
+                  color: filterPaiement === "NonPaye" ? "#FF8A8D" : MUTED,
+                  background: filterPaiement === "NonPaye" ? "rgba(229,72,77,0.14)" : "rgba(255,255,255,0.03)",
+                }}><IconX size={12} color={filterPaiement === "NonPaye" ? "#FF8A8D" : MUTED} style={{ marginRight: 5, display: "inline-block", verticalAlign: -1 }} />Non payé</div>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 10, padding: "9px 12px", background: "rgba(196,149,42,0.06)", border: "1px solid rgba(196,149,42,0.2)", borderRadius: 8 }}>
+                <span style={{ fontSize: 12, color: MUTED }}>Reste à percevoir (tous dossiers)</span>
+                <span style={{ fontSize: 13, fontWeight: 700, color: GOLD }}>{fmtFCFA(resteTotal)}</span>
+              </div>
+            </div>
+
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <div style={{ fontSize: 11, color: MUTED, textTransform: "uppercase" }}>Alertes</div>
+                <Toggle on={alertesActives} onChange={setAlertesActives} />
+              </div>
+              {alertesActives && (
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  <div onClick={() => setFilterUrgency(filterUrgency === "red" ? "Tous" : "red")} style={{
+                    ...selectChipStyle(filterUrgency === "red"),
+                    borderColor: filterUrgency === "red" ? RED : "rgba(255,255,255,0.12)",
+                    color: filterUrgency === "red" ? "#FF8A8D" : MUTED,
+                    background: filterUrgency === "red" ? "rgba(229,72,77,0.14)" : "rgba(255,255,255,0.03)",
+                  }}><IconAlertTriangle size={13} color={filterUrgency === "red" ? "#FF8A8D" : MUTED} style={{ marginRight: 5, display: "inline-block", verticalAlign: -2 }} />Rouge</div>
+                  <div onClick={() => setFilterUrgency(filterUrgency === "yellow" ? "Tous" : "yellow")} style={{
+                    ...selectChipStyle(filterUrgency === "yellow"),
+                    borderColor: filterUrgency === "yellow" ? AMBER : "rgba(255,255,255,0.12)",
+                    color: filterUrgency === "yellow" ? AMBER : MUTED,
+                    background: filterUrgency === "yellow" ? "rgba(245,185,61,0.14)" : "rgba(255,255,255,0.03)",
+                  }}><IconClock size={13} color={filterUrgency === "yellow" ? AMBER : MUTED} style={{ marginRight: 5, display: "inline-block", verticalAlign: -2 }} />Jaune</div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {filtered.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "60px 20px", color: MUTED }}>
+          <IconPackage size={32} color={MUTED} style={{ marginBottom: 12 }} />
+          <div style={{ fontSize: 14 }}>{dossiers.length === 0 ? "Aucun dossier pour le moment. Créez le premier." : "Aucun dossier ne correspond à ces critères."}</div>
+        </div>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 14 }}>
+          {filtered.map((d) => <DossierCard key={d.id} d={d} onOpen={onOpen} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------- Modal correction point de départ (accessible même après création de dossiers) ---------- */
+function EditStartSequenceModal({ currentStart, currentPrefixe, currentSuffixe, currentLargeur, hasDossiers, onClose, onSaved }) {
+  const [prefixe, setPrefixe] = useState(currentPrefixe || "OK26");
+  const [suffixe, setSuffixe] = useState(currentSuffixe || "SS");
+  const [value, setValue] = useState(currentLargeur ? String(currentStart || "").padStart(currentLargeur, "0") : String(currentStart || ""));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const n = parseInt(value, 10);
+  const largeur = value.trim().length;
+  const valid = value.trim() !== "" && /^\d+$/.test(value.trim()) && n > 0;
+  const apercu = valid ? prefixe + String(n).padStart(largeur, "0") + suffixe : "";
+
+  const handleSave = async () => {
+    if (!valid) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await forceStartSequenceRemote(n, prefixe, suffixe, largeur);
+      onSaved({ start: n, prefixe, suffixe, largeur });
+    } catch (e) {
+      setError("Impossible de mettre à jour : " + (e.message || "erreur inconnue"));
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={onClose}>
+      <div style={{ background: INK_2, border: "1px solid rgba(255,255,255,0.1)", borderRadius: 16, padding: 24, maxWidth: 420, width: "100%" }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: PAPER }}>Modifier le format du répertoire</div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", display: "flex" }}><IconX size={18} color={MUTED} /></button>
+        </div>
+
+        {hasDossiers && (
+          <div style={{ fontSize: 12.5, color: AMBER, background: "rgba(245,185,61,0.1)", border: "1px solid rgba(245,185,61,0.3)", borderRadius: 10, padding: 12, marginBottom: 16, lineHeight: 1.5 }}>
+            Des dossiers existent déjà. Cette modification ne renumérote pas les dossiers existants — elle ne change que le format des prochains numéros.
+          </div>
+        )}
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+          <Field label="Préfixe">
+            <input style={inputStyle} value={prefixe} onChange={(e) => setPrefixe(e.target.value)} />
+          </Field>
+          <Field label="Suffixe">
+            <input style={inputStyle} value={suffixe} onChange={(e) => setSuffixe(e.target.value)} />
+          </Field>
+        </div>
+
+        <Field label="Nombre de départ">
+          <input style={inputStyle} value={value} onChange={(e) => setValue(e.target.value.replace(/[^0-9]/g, ""))} />
+        </Field>
+
+        {valid && (
+          <div style={{ fontSize: 12.5, color: GOLD, marginBottom: 14, fontFamily: "ui-monospace, monospace" }}>
+            Prochain numéro potentiel : {apercu}
+          </div>
+        )}
+
+        {error && <div style={{ fontSize: 12.5, color: "#FF8A8D", marginBottom: 10 }}>{error}</div>}
+
+        <div style={{ display: "flex", gap: 10 }}>
+          <button onClick={onClose} style={{ flex: 1, padding: "12px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.12)", background: "transparent", color: MUTED, fontWeight: 600, cursor: "pointer" }}>Annuler</button>
+          <button onClick={handleSave} disabled={!valid || saving} style={{
+            flex: 1, padding: "12px", borderRadius: 10, border: "none", background: GOLD, color: INK, fontWeight: 700,
+            cursor: valid && !saving ? "pointer" : "not-allowed", opacity: valid && !saving ? 1 : 0.5,
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+          }}>
+            {saving && <IconLoader size={14} color={INK} style={{ animation: "spin 1s linear infinite" }} />}
+            {saving ? "Enregistrement…" : "Enregistrer"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- App racine ---------- */
+function App() {
+  const [dossiers, setDossiers] = useState([]);
+  const [startSequence, setStartSequence] = useState(undefined);
+  const [repFormat, setRepFormat] = useState(null); // {prefixe, suffixe, largeur}
+  const [view, setView] = useState("dashboard");
+  const [activeId, setActiveId] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [connError, setConnError] = useState(null); // null = pas d'erreur, sinon message détaillé
+  const [showEditStart, setShowEditStart] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [start, fmt, res] = await Promise.all([
+          fetchStartSequence(),
+          fetchRepertoireFormat(),
+          supabase.from("dossiers").select("*").order("sequence_number", { ascending: false }),
+        ]);
+        if (res.error) throw res.error;
+        if (cancelled) return;
+        setStartSequence(start);
+        setRepFormat(fmt);
+        setDossiers(res.data || []);
+      } catch (e) {
+        if (!cancelled) setConnError(e.message || "Erreur de connexion inconnue à Supabase.");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    const channel = supabase
+      .channel("dossiers-realtime")
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "dossiers" }, (payload) => {
+        setDossiers((prev) => (prev.some((d) => d.id === payload.new.id) ? prev : [payload.new, ...prev]));
+      })
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "dossiers" }, (payload) => {
+        setDossiers((prev) => prev.map((d) => (d.id === payload.new.id ? payload.new : d)));
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, []);
+
+  const openDossier = (d) => { setActiveId(d.id); setView("detail"); };
+  const createDossier = (d) => {
+    setDossiers((prev) => (prev.some((x) => x.id === d.id) ? prev : [d, ...prev]));
+    setActiveId(d.id);
+    setView("detail");
+  };
+  const updateDossier = (updated) => setDossiers((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
+  const activeDossier = dossiers.find((d) => d.id === activeId);
+
+  if (loading) {
+    return (
+      <div style={{ minHeight: "100vh", background: INK, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <IconLoader size={22} color={GOLD} style={{ animation: "spin 1s linear infinite" }} />
+      </div>
+    );
+  }
+
+  if (connError) {
+    return (
+      <div style={{ minHeight: "100vh", background: INK, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+        <div style={{ maxWidth: 420, textAlign: "center" }}>
+          <IconAlertTriangle size={28} color={RED} style={{ marginBottom: 12 }} />
+          <div style={{ fontSize: 15, fontWeight: 700, color: PAPER, marginBottom: 8 }}>Connexion à Supabase impossible</div>
+          <div style={{ fontSize: 13, color: MUTED, lineHeight: 1.5, marginBottom: 14 }}>
+            Vérifiez la connexion internet, que le script SQL a bien été exécuté dans Supabase, et que l'URL / clé API sont correctes.
+          </div>
+          <div style={{ fontSize: 12, color: "#FF8A8D", background: "rgba(229,72,77,0.08)", border: "1px solid rgba(229,72,77,0.25)", borderRadius: 10, padding: 12, textAlign: "left", wordBreak: "break-word" }}>
+            {connError}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ minHeight: "100vh", background: INK, fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" }}>
+      <div style={{ borderBottom: "1px solid rgba(255,255,255,0.06)", padding: "16px 24px", position: "sticky", top: 0, background: INK, zIndex: 10 }}>
+        <div style={{ maxWidth: 980, margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ width: 30, height: 30, borderRadius: 8, background: GOLD, display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <IconPackage size={16} color={INK} />
+            </div>
+            <span style={{ fontSize: 15, fontWeight: 700, color: PAPER }}>SOUF-SOUM Transit</span>
+          </div>
+          <div style={{ fontSize: 12, color: MUTED, display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ width: 7, height: 7, borderRadius: "50%", background: GREEN, display: "inline-block" }} />
+            Synchronisé
+          </div>
+        </div>
+      </div>
+
+      <div style={{ padding: "28px 16px 60px" }}>
+        {startSequence === null ? (
+          <StartSequenceSetup onConfirm={(f) => { setStartSequence(f.start); setRepFormat({ prefixe: f.prefixe, suffixe: f.suffixe, largeur: f.largeur }); }} />
+        ) : (
+          <React.Fragment>
+            {view === "dashboard" && (
+              <Dashboard dossiers={dossiers} onOpen={openDossier} onNew={() => setView("new")} onEditStart={() => setShowEditStart(true)} />
+            )}
+            {view === "new" && <NewDossierForm onCancel={() => setView("dashboard")} onCreate={createDossier} />}
+            {view === "detail" && activeDossier && <DossierDetail dossier={activeDossier} onBack={() => setView("dashboard")} onUpdate={updateDossier} />}
+          </React.Fragment>
+        )}
+      </div>
+
+      {showEditStart && (
+        <EditStartSequenceModal
+          currentStart={startSequence}
+          currentPrefixe={repFormat ? repFormat.prefixe : "OK26"}
+          currentSuffixe={repFormat ? repFormat.suffixe : "SS"}
+          currentLargeur={repFormat ? repFormat.largeur : 0}
+          hasDossiers={dossiers.length > 0}
+          onClose={() => setShowEditStart(false)}
+          onSaved={(f) => { setStartSequence(f.start); setRepFormat({ prefixe: f.prefixe, suffixe: f.suffixe, largeur: f.largeur }); setShowEditStart(false); }}
+        />
+      )}
+    </div>
+  );
+}
+
+try {
+  ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+} catch (e) {
+  const boot = document.getElementById("boot-error");
+  const detail = document.getElementById("boot-error-detail");
+  boot.style.display = "block";
+  detail.textContent = "Erreur au montage de l'application :\n" + (e.message || e);
+}
+</script>
+</body>
+</html>
