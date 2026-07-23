@@ -227,6 +227,22 @@ async function repertoireExists(repertoire) {
   return !!data;
 }
 
+async function renameRepertoireRemote(id, nouveauRepertoire) {
+  const { data, error } = await supabase.rpc("rename_repertoire", { p_id: id, p_new_repertoire: nouveauRepertoire });
+  if (error) {
+    if ((error.message || "").includes("DUPLICATE_REPERTOIRE")) {
+      throw new Error("Ce répertoire est déjà attribué");
+    }
+    throw error;
+  }
+  return data;
+}
+
+async function deleteDossierRemote(id) {
+  const { error } = await supabase.rpc("delete_dossier", { p_id: id });
+  if (error) throw error;
+}
+
 async function fetchStartSequence() {
   const { data, error } = await supabase.from("app_config").select("value").eq("key", "start_sequence").maybeSingle();
   if (error) throw error;
@@ -448,6 +464,13 @@ function DossierCard({ d, onOpen }) {
           {NIVEAU_LABEL[etat.niveau]}{etat.sousEtape ? " · " + etat.sousEtape : ""}
         </span>
       </div>
+
+      {d.parcours === "Exoneration" && (d.exo_licence160 || d.exo_attestation) && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 6 }}>
+          {d.exo_licence160 && <Badge tone="amber">Licence 160 · {d.exo_licence160}</Badge>}
+          {d.exo_attestation && <Badge tone="amber">Attestation · {d.exo_attestation}</Badge>}
+        </div>
+      )}
 
       <div style={{ height: 1, background: "rgba(255,255,255,0.08)", margin: "10px 0 14px" }} />
 
@@ -760,12 +783,62 @@ function NewDossierForm({ onCancel, onCreate }) {
   );
 }
 
+/* ---------- Modal renommage répertoire ---------- */
+function RenameRepertoireModal({ dossierId, currentRepertoire, onClose, onRenamed }) {
+  const [value, setValue] = useState(currentRepertoire);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const valid = value.trim() !== "" && value.trim() !== currentRepertoire;
+
+  const handleSave = async () => {
+    if (!valid) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const updated = await renameRepertoireRemote(dossierId, value.trim());
+      onRenamed(updated);
+    } catch (e) {
+      setError(e.message || "Erreur inconnue");
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={onClose}>
+      <div style={{ background: INK_2, border: "1px solid rgba(255,255,255,0.1)", borderRadius: 16, padding: 24, maxWidth: 420, width: "100%" }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: PAPER }}>Modifier le répertoire</div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", display: "flex" }}><IconX size={18} color={MUTED} /></button>
+        </div>
+        <Field label="Nouveau répertoire">
+          <input style={inputStyle} value={value} onChange={(e) => setValue(e.target.value.toUpperCase())} />
+        </Field>
+        {error && <div style={{ fontSize: 12.5, color: "#FF8A8D", marginBottom: 10 }}>{error}</div>}
+        <div style={{ display: "flex", gap: 10 }}>
+          <button onClick={onClose} style={{ flex: 1, padding: "12px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.12)", background: "transparent", color: MUTED, fontWeight: 600, cursor: "pointer" }}>Annuler</button>
+          <button onClick={handleSave} disabled={!valid || saving} style={{
+            flex: 1, padding: "12px", borderRadius: 10, border: "none", background: GOLD, color: INK, fontWeight: 700,
+            cursor: valid && !saving ? "pointer" : "not-allowed", opacity: valid && !saving ? 1 : 0.5,
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+          }}>
+            {saving && <IconLoader size={14} color={INK} style={{ animation: "spin 1s linear infinite" }} />}
+            {saving ? "Enregistrement…" : "Enregistrer"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ---------- Détail dossier ---------- */
-function DossierDetail({ dossier, onBack, onUpdate }) {
+function DossierDetail({ dossier, onBack, onUpdate, onDelete }) {
   const [draft, setDraft] = useState(dossier);
   const [saving, setSaving] = useState(false);
   const [tab, setTab] = useState("client");
   const urgency = urgencyOf(draft);
+  const [showRename, setShowRename] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => { setDraft(dossier); }, [dossier]);
 
@@ -832,6 +905,17 @@ function DossierDetail({ dossier, onBack, onUpdate }) {
 
   const handleAnnuler = () => { setDraft(dossier); setSaveError(null); };
 
+  const handleDelete = async () => {
+    setDeleting(true);
+    try {
+      await deleteDossierRemote(draft.id);
+      onDelete(draft.id);
+    } catch (e) {
+      setSaveError("Échec de la suppression : " + (e.message || "erreur inconnue"));
+      setDeleting(false);
+    }
+  };
+
   const reste = (draft.montant_total || 0) - (draft.montant_paye || 0);
   const equipLabel = [draft.nb_conteneurs_20 ? draft.nb_conteneurs_20 + "x20'" : null, draft.nb_conteneurs_40 ? draft.nb_conteneurs_40 + "x40'" : null].filter(Boolean).join(" · ");
   const etat = niveauAffiche(draft);
@@ -859,8 +943,47 @@ function DossierDetail({ dossier, onBack, onUpdate }) {
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           {urgency === "red" && <Badge tone="red"><IconAlertTriangle size={12} color="#FF8A8D" />Retard 48h+</Badge>}
           {urgency === "yellow" && <Badge tone="amber"><IconClock size={12} color={AMBER} />En requête</Badge>}
+          <button onClick={() => setShowRename(true)} title="Modifier le répertoire" style={{
+            display: "flex", alignItems: "center", padding: "8px", borderRadius: 9, border: "1px solid rgba(255,255,255,0.12)",
+            background: "transparent", color: MUTED, cursor: "pointer",
+          }}><IconSettings size={14} color={MUTED} /></button>
+          <button onClick={() => setShowDeleteConfirm(true)} title="Supprimer le dossier" style={{
+            display: "flex", alignItems: "center", padding: "8px", borderRadius: 9, border: "1px solid rgba(229,72,77,0.3)",
+            background: "rgba(229,72,77,0.08)", color: "#FF8A8D", cursor: "pointer",
+          }}><IconX size={14} color="#FF8A8D" /></button>
         </div>
       </div>
+
+      {showRename && (
+        <RenameRepertoireModal
+          dossierId={draft.id}
+          currentRepertoire={draft.repertoire}
+          onClose={() => setShowRename(false)}
+          onRenamed={(updated) => { setShowRename(false); setDraft(updated); onUpdate(updated); }}
+        />
+      )}
+
+      {showDeleteConfirm && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={() => !deleting && setShowDeleteConfirm(false)}>
+          <div style={{ background: INK_2, border: "1px solid rgba(229,72,77,0.3)", borderRadius: 16, padding: 24, maxWidth: 400, width: "100%" }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: PAPER, marginBottom: 8 }}>Supprimer ce dossier ?</div>
+            <div style={{ fontSize: 13, color: MUTED, marginBottom: 18, lineHeight: 1.5 }}>
+              Le dossier <span style={{ color: GOLD, fontFamily: "ui-monospace, monospace" }}>{draft.repertoire}</span> sera supprimé définitivement. Cette action est irréversible.
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={() => setShowDeleteConfirm(false)} disabled={deleting} style={{ flex: 1, padding: "12px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.12)", background: "transparent", color: MUTED, fontWeight: 600, cursor: "pointer" }}>Annuler</button>
+              <button onClick={handleDelete} disabled={deleting} style={{
+                flex: 1, padding: "12px", borderRadius: 10, border: "none", background: RED, color: PAPER, fontWeight: 700,
+                cursor: deleting ? "not-allowed" : "pointer", opacity: deleting ? 0.6 : 1,
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+              }}>
+                {deleting && <IconLoader size={14} color={PAPER} style={{ animation: "spin 1s linear infinite" }} />}
+                {deleting ? "Suppression…" : "Supprimer"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div style={{ display: "flex", gap: 4, marginBottom: 20, background: INK_2, borderRadius: 12, padding: 4, border: "1px solid rgba(255,255,255,0.08)" }}>
         {TABS.map((t) => (
@@ -1514,6 +1637,11 @@ function App() {
     setView("detail");
   };
   const updateDossier = (updated) => setDossiers((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
+  const deleteDossierLocal = (id) => {
+    setDossiers((prev) => prev.filter((d) => d.id !== id));
+    setView("dashboard");
+    setActiveId(null);
+  };
   const activeDossier = dossiers.find((d) => d.id === activeId);
 
   if (loading) {
@@ -1578,7 +1706,7 @@ function App() {
               <Dashboard dossiers={dossiers} onOpen={openDossier} onNew={() => setView("new")} onEditStart={() => setShowEditStart(true)} />
             )}
             {view === "new" && <NewDossierForm onCancel={() => setView("dashboard")} onCreate={createDossier} />}
-            {view === "detail" && activeDossier && <DossierDetail dossier={activeDossier} onBack={() => setView("dashboard")} onUpdate={updateDossier} />}
+            {view === "detail" && activeDossier && <DossierDetail dossier={activeDossier} onBack={() => setView("dashboard")} onUpdate={updateDossier} onDelete={deleteDossierLocal} />}
             {view === "suivi-licences" && <SuiviLicences dossiers={dossiers} onUpdate={updateDossier} onBack={() => setView("dashboard")} />}
           </React.Fragment>
         )}
