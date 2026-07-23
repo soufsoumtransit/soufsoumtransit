@@ -150,6 +150,22 @@ function hoursSince(dateStr) {
   return (Date.now() - new Date(dateStr).getTime()) / 36e5;
 }
 
+// Extrait la séquence numérique d'un répertoire, en retirant si possible le préfixe/suffixe
+// connus (format) avant de lire les chiffres. Sans cela, un préfixe contenant des chiffres
+// (ex: "OK26") pouvait fusionner avec le numéro ("190") en un seul bloc "26190", provoquant
+// le doublon d'année observé. Miroir JS de extract_repertoire_numeric_ctx() en SQL.
+// Extrait le nombre entier contenu dans le répertoire : on concatène tous les chiffres
+// trouvés dans le texte, dans l'ordre, en ignorant lettres/préfixe/suffixe. C'est ce
+// nombre qui sert à comparer deux répertoires entre eux (tri et calcul du suivant),
+// exactement comme "OK26180SS" -> 26180 et "OK26095CSS" -> 26095.
+function extractRepertoireNumeric(repertoire) {
+  if (!repertoire) return null;
+  const chiffres = repertoire.replace(/\D/g, "");
+  if (!chiffres) return null;
+  const n = parseInt(chiffres, 10);
+  return Number.isNaN(n) ? null : n;
+}
+
 function urgencyOf(d) {
   const avdReq = d.statut_avd === "En requête";
   const licReq = (d.statuts_licences || []).some((l) => l.statut === "En requête");
@@ -204,11 +220,27 @@ function timeAgo(dateStr) {
   return Math.round(h / 24) + " j";
 }
 
-async function getNextRepertoire() {
-  const { data, error } = await supabase.rpc("next_repertoire");
-  if (error) throw error;
-  const row = Array.isArray(data) ? data[0] : data;
-  return { repertoire: row.repertoire, sequence_number: row.seq };
+async function getNextRepertoire(dossiersConnus) {
+  try {
+    const { data, error } = await supabase.rpc("next_repertoire");
+    if (error) throw error;
+    const row = Array.isArray(data) ? data[0] : data;
+    if (row && row.repertoire) return { repertoire: row.repertoire, sequence_number: row.seq };
+    throw new Error("Réponse vide du serveur");
+  } catch (e) {
+    // Filet de sécurité : si le RPC échoue (RLS, réseau, config absente…), on calcule
+    // quand même un numéro à partir des dossiers déjà chargés en mémoire, pour ne
+    // JAMAIS laisser le champ "Prochain numéro" vide à l'écran.
+    const fmt = (await fetchRepertoireFormat().catch(() => null)) || { prefixe: "OK", suffixe: "SS", largeur: 5 };
+    const liste = dossiersConnus || [];
+    const max = liste.reduce((m, d) => {
+      const n = extractRepertoireNumeric(d.repertoire);
+      return n !== null && n > m ? n : m;
+    }, 0);
+    const next = max + 1;
+    const repertoire = (fmt.prefixe || "") + String(next).padStart(fmt.largeur || 3, "0") + (fmt.suffixe || "");
+    return { repertoire, sequence_number: next };
+  }
 }
 
 async function setStartSequenceRemote(n, prefixe, suffixe, largeur) {
@@ -476,13 +508,15 @@ function DossierCard({ d, onOpen }) {
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ display: "flex", gap: 14 }}>
-          <div>
-            <div style={{ fontSize: 10.5, color: MUTED, textTransform: "uppercase" }}>Paiement</div>
-            <div style={{ fontSize: 14, fontWeight: 700, color: paiementOk ? GREEN : "#FF8A8D", display: "flex", alignItems: "center", gap: 4 }}>
-              {paiementOk ? <IconCheck size={13} color={GREEN} /> : <IconX size={13} color="#FF8A8D" />}
-              {paiementOk ? "Payé" : (d.paiement_simple === false ? fmtFCFA(reste) + " restant" : "Non payé")}
+          {(d.paiement_simple === false || d.paye === true || d.paye === false) && (
+            <div>
+              <div style={{ fontSize: 10.5, color: MUTED, textTransform: "uppercase" }}>Paiement</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: paiementOk ? GREEN : "#FF8A8D", display: "flex", alignItems: "center", gap: 4 }}>
+                {paiementOk ? <IconCheck size={13} color={GREEN} /> : <IconX size={13} color="#FF8A8D" />}
+                {paiementOk ? "Payé" : (d.paiement_simple === false ? fmtFCFA(reste) + " restant" : "Non payé")}
+              </div>
             </div>
-          </div>
+          )}
           {d.numero_bl && (
             <div>
               <div style={{ fontSize: 10.5, color: MUTED, textTransform: "uppercase" }}>BL</div>
@@ -496,7 +530,7 @@ function DossierCard({ d, onOpen }) {
 }
 
 /* ---------- Formulaire nouveau dossier ---------- */
-function NewDossierForm({ onCancel, onCreate }) {
+function NewDossierForm({ onCancel, onCreate, dossiers, repFormat }) {
   const [parcours, setParcours] = useState(null);
   const [nouveauStatut, setNouveauStatut] = useState(null);
   const [dateDossier, setDateDossier] = useState(new Date().toISOString().slice(0, 10));
@@ -524,7 +558,7 @@ function NewDossierForm({ onCancel, onCreate }) {
 
   useEffect(() => {
     let cancelled = false;
-    getNextRepertoire().then(({ repertoire, sequence_number }) => {
+    getNextRepertoire(dossiers).then(({ repertoire, sequence_number }) => {
       if (cancelled) return;
       setRepertoireAuto(repertoire);
       setSeqAuto(sequence_number);
@@ -565,14 +599,13 @@ function NewDossierForm({ onCancel, onCreate }) {
       let repertoire = repertoireFinal;
       let sequence_number = seqAuto;
       if (modeRepertoire === "auto") {
-        const fresh = await getNextRepertoire();
+        const fresh = await getNextRepertoire(dossiers);
         repertoire = fresh.repertoire;
         sequence_number = fresh.sequence_number;
       } else {
         const exists = await repertoireExists(repertoire);
         if (exists) { setError("Ce répertoire existe déjà. Choisissez-en un autre."); setSaving(false); return; }
-        const match = repertoire.match(/^\D*(\d+)\D*$/);
-        sequence_number = match ? parseInt(match[1], 10) : 0;
+        sequence_number = extractRepertoireNumeric(repertoire) || 0;
       }
 
       const payload = {
@@ -603,7 +636,23 @@ function NewDossierForm({ onCancel, onCreate }) {
         paye_chez: payeChez,
       };
       const { data, error: insertError } = await supabase.from("dossiers").insert(payload).select().single();
-      if (insertError) throw insertError;
+      if (insertError) {
+        // Violation de la contrainte UNIQUE (deux créations concurrentes ont visé le même numéro) :
+        // on informe l'utilisateur et on recalcule immédiatement un nouveau numéro automatique.
+        if (insertError.code === "23505" || (insertError.message || "").includes("dossiers_repertoire_unique")) {
+          setError("Numéro déjà utilisé, actualisation…");
+          if (modeRepertoire === "auto") {
+            try {
+              const fresh = await getNextRepertoire(dossiers);
+              setRepertoireAuto(fresh.repertoire);
+              setSeqAuto(fresh.sequence_number);
+            } catch (e2) { /* on laisse l'utilisateur relancer manuellement */ }
+          }
+          setSaving(false);
+          return;
+        }
+        throw insertError;
+      }
       onCreate(data);
     } catch (e) {
       setError("Impossible de créer le dossier : " + (e.message || "erreur inconnue"));
@@ -1211,7 +1260,7 @@ function DossierDetail({ dossier, onBack, onUpdate, onDelete }) {
 }
 
 /* ---------- Dashboard ---------- */
-function Dashboard({ dossiers, onOpen, onNew, onEditStart }) {
+function Dashboard({ dossiers, onOpen, onNew, onEditStart, repFormat }) {
   const [filterOp, setFilterOp] = useState("Tous");
   const [filterNiveau, setFilterNiveau] = useState("Tous");
   const [filterSousEtape, setFilterSousEtape] = useState("Tous");
@@ -1242,9 +1291,18 @@ function Dashboard({ dossiers, onOpen, onNew, onEditStart }) {
     .filter((d) => filterUrgency === "Tous" || d._urgency === filterUrgency)
     .filter((d) => filterPaiement === "Tous" || (filterPaiement === "Paye" ? estPaye(d) : !estPaye(d)))
     .filter((d) => !search || d.repertoire.toLowerCase().includes(search.toLowerCase()) || (d.client_nom || "").toLowerCase().includes(search.toLowerCase()) || (d.type_marchandise || "").toLowerCase().includes(search.toLowerCase()))
-    .sort((a, b) => b.sequence_number - a.sequence_number);
+    .sort((a, b) => (extractRepertoireNumeric(b.repertoire) ?? -1) - (extractRepertoireNumeric(a.repertoire) ?? -1));
 
   const filtresActifs = [filterOp !== "Tous", filterUrgency !== "Tous", filterPaiement !== "Tous"].filter(Boolean).length;
+
+  // Signalement des répertoires au format suspect (ex: OK2626151SS) : trop de chiffres
+  // collés, ou aucun chiffre exploitable. On ne renomme jamais automatiquement — l'action
+  // reste manuelle via "Modifier le répertoire" pour éviter de casser un lien externe.
+  const dossiersSuspects = dossiers.filter((d) => {
+    const num = extractRepertoireNumeric(d.repertoire);
+    const chiffresColles = (d.repertoire || "").replace(/\D/g, "").length;
+    return num === null || chiffresColles > 6;
+  });
 
   return (
     <div style={{ maxWidth: 980, margin: "0 auto" }}>
@@ -1270,6 +1328,15 @@ function Dashboard({ dossiers, onOpen, onNew, onEditStart }) {
         <StatPill label="Alertes rouges" value={red} tone="red" />
         <StatPill label="En surveillance" value={yellow} tone="amber" />
       </div>
+
+      {dossiersSuspects.length > 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", background: "rgba(245,185,61,0.08)", border: "1px solid rgba(245,185,61,0.3)", borderRadius: 10, marginBottom: 16 }}>
+          <IconAlertTriangle size={15} color={AMBER} />
+          <span style={{ fontSize: 12.5, color: AMBER, lineHeight: 1.4 }}>
+            {dossiersSuspects.length} répertoire{dossiersSuspects.length > 1 ? "s ont" : " a"} un format inhabituel ({dossiersSuspects.map((d) => d.repertoire).join(", ")}). Vérifiez-les via "Modifier le répertoire" dans leur fiche.
+          </span>
+        </div>
+      )}
 
       <div style={{ position: "relative", flex: "1 1 220px", marginBottom: 14 }}>
         <IconSearch size={15} color={MUTED} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)" }} />
@@ -1703,9 +1770,9 @@ function App() {
         ) : (
           <React.Fragment>
             {view === "dashboard" && (
-              <Dashboard dossiers={dossiers} onOpen={openDossier} onNew={() => setView("new")} onEditStart={() => setShowEditStart(true)} />
+              <Dashboard dossiers={dossiers} onOpen={openDossier} onNew={() => setView("new")} onEditStart={() => setShowEditStart(true)} repFormat={repFormat} />
             )}
-            {view === "new" && <NewDossierForm onCancel={() => setView("dashboard")} onCreate={createDossier} />}
+            {view === "new" && <NewDossierForm onCancel={() => setView("dashboard")} onCreate={createDossier} dossiers={dossiers} repFormat={repFormat} />}
             {view === "detail" && activeDossier && <DossierDetail dossier={activeDossier} onBack={() => setView("dashboard")} onUpdate={updateDossier} onDelete={deleteDossierLocal} />}
             {view === "suivi-licences" && <SuiviLicences dossiers={dossiers} onUpdate={updateDossier} onBack={() => setView("dashboard")} />}
           </React.Fragment>
